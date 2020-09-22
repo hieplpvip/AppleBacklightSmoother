@@ -34,7 +34,7 @@ static KernelPatcher::KextInfo kextIntelCNLFb   { "com.apple.driver.AppleIntelCN
 static KernelPatcher::KextInfo kextIntelICLLPFb { "com.apple.driver.AppleIntelICLLPGraphicsFramebuffer", pathIntelICLLPFb, arrsize(pathIntelICLLPFb), {}, {}, KernelPatcher::KextInfo::Unloaded };
 static KernelPatcher::KextInfo kextIntelICLHPFb { "com.apple.driver.AppleIntelICLHPGraphicsFramebuffer", pathIntelICLHPFb, arrsize(pathIntelICLHPFb), {}, {}, KernelPatcher::KextInfo::Unloaded };
 
-static Smoother *ADDPR(callbackSmoother);
+static AppleBacklightSmootherController *ADDPR(callbackSmoother);
 static IOCommandGate* ADDPR(cmdGate);
 
 static KernelPatcher::KextInfo *ADDPR(currentFramebuffer);
@@ -45,9 +45,9 @@ static bool ADDPR(backlightValueAssigned);
 static uint32_t ADDPR(backlightValue);
 
 #define super IOService
-OSDefineMetaClassAndStructors(Smoother, IOService)
+OSDefineMetaClassAndStructors(AppleBacklightSmootherController, IOService)
 
-bool Smoother::start(IOService *provider) {
+bool AppleBacklightSmootherController::start(IOService *provider) {
 	if (ADDPR(callbackSmoother)) {
 		return false;
 	}
@@ -74,14 +74,14 @@ bool Smoother::start(IOService *provider) {
 
 EXPORT IOReturn ADDPR(wrapHwSetBacklight)(void *that, uint32_t backlight) {
 	if (ADDPR(cmdGate)) {
-		ADDPR(cmdGate)->runAction(OSMemberFunctionCast(IOCommandGate::Action, ADDPR(callbackSmoother), &Smoother::wrapHwSetBacklightGated), that, (void *)&backlight);
+		ADDPR(cmdGate)->runAction(OSMemberFunctionCast(IOCommandGate::Action, ADDPR(callbackSmoother), &AppleBacklightSmootherController::wrapHwSetBacklightGated), that, (void *)&backlight);
 	} else {
 		ADDPR(orgHwSetBacklight)(that, backlight);
 	}
 	return kIOReturnSuccess;
 }
 
-IOReturn Smoother::wrapHwSetBacklightGated(void *that, uint32_t *backlight) {
+IOReturn AppleBacklightSmootherController::wrapHwSetBacklightGated(void *that, uint32_t *backlight) {
 	DBGLOG("smoother", "wrapHwSetBacklight called: backlight 0x%x", *backlight);
 
 	if (ADDPR(backlightValueAssigned)) {

@@ -8,8 +8,8 @@
 #ifndef kern_smoother_hpp
 #define kern_smoother_hpp
 
-class Smoother : public IOService {
-	OSDeclareDefaultStructors(Smoother)
+class AppleBacklightSmootherController : public IOService {
+	OSDeclareDefaultStructors(AppleBacklightSmootherController)
 
 public:
 	bool start(IOService *provider) override;
