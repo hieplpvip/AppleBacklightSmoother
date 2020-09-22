@@ -5,6 +5,11 @@
 //  Copyright © 2020 Le Bao Hiep. All rights reserved.
 //
 
+#include <Headers/plugin_start.hpp>
+#include <Headers/kern_api.hpp>
+#include <Headers/kern_devinfo.hpp>
+#include <IOKit/IOCommandGate.h>
+
 #include "kern_smoother.hpp"
 
 static const char *pathIntelSNBFb[]   { "/System/Library/Extensions/AppleIntelSNBGraphicsFB.kext/Contents/MacOS/AppleIntelSNBGraphicsFB" };
@@ -29,10 +34,134 @@ static KernelPatcher::KextInfo kextIntelCNLFb   { "com.apple.driver.AppleIntelCN
 static KernelPatcher::KextInfo kextIntelICLLPFb { "com.apple.driver.AppleIntelICLLPGraphicsFramebuffer", pathIntelICLLPFb, arrsize(pathIntelICLLPFb), {}, {}, KernelPatcher::KextInfo::Unloaded };
 static KernelPatcher::KextInfo kextIntelICLHPFb { "com.apple.driver.AppleIntelICLHPGraphicsFramebuffer", pathIntelICLHPFb, arrsize(pathIntelICLHPFb), {}, {}, KernelPatcher::KextInfo::Unloaded };
 
-Smoother *Smoother::callbackSmoother;
+static Smoother *ADDPR(callbackSmoother);
+static IOCommandGate* ADDPR(cmdGate);
 
-void Smoother::init() {
-	callbackSmoother = this;
+static KernelPatcher::KextInfo *ADDPR(currentFramebuffer);
+static KernelPatcher::KextInfo *ADDPR(currentFramebufferOpt);
+
+static uint32_t (*ADDPR(orgHwSetBacklight))(void *, uint32_t);
+static bool ADDPR(backlightValueAssigned);
+static uint32_t ADDPR(backlightValue);
+
+#define super IOService
+OSDefineMetaClassAndStructors(Smoother, IOService)
+
+bool Smoother::start(IOService *provider) {
+	if (ADDPR(callbackSmoother)) {
+		return false;
+	}
+
+	if (!super::start(provider)) {
+		SYSLOG("smoother", "failed to start super");
+		return false;
+	}
+
+	ADDPR(callbackSmoother) = this;
+
+	IOWorkLoop* workLoop = getWorkLoop();
+	if (!workLoop) {
+		return false;
+	}
+
+	ADDPR(cmdGate) = IOCommandGate::commandGate(this);
+	if (ADDPR(cmdGate)) {
+		workLoop->addEventSource(ADDPR(cmdGate));
+	}
+
+	return true;
+}
+
+EXPORT IOReturn ADDPR(wrapHwSetBacklight)(void *that, uint32_t backlight) {
+	if (ADDPR(cmdGate)) {
+		ADDPR(cmdGate)->runAction(OSMemberFunctionCast(IOCommandGate::Action, ADDPR(callbackSmoother), &Smoother::wrapHwSetBacklightGated), that, (void *)&backlight);
+	} else {
+		ADDPR(orgHwSetBacklight)(that, backlight);
+	}
+	return kIOReturnSuccess;
+}
+
+IOReturn Smoother::wrapHwSetBacklightGated(void *that, uint32_t *backlight) {
+	DBGLOG("smoother", "wrapHwSetBacklight called: backlight 0x%x", *backlight);
+
+	if (ADDPR(backlightValueAssigned)) {
+		uint32_t curBacklight = ADDPR(backlightValue);
+		uint32_t newBacklight = *backlight;
+		uint32_t diff = (newBacklight > curBacklight) ? (newBacklight - curBacklight) : (curBacklight - newBacklight);
+		if (diff > 0x10) {
+			uint32_t steps = (diff < 0x40) ? 4 : 16;
+			uint32_t delta = diff / steps;
+			if (newBacklight > curBacklight) {
+				while ((curBacklight += delta) < newBacklight) {
+					DBGLOG("smoother", "wrapHwSetBacklight set backlight 0x%x delta %d", curBacklight, delta);
+					ADDPR(orgHwSetBacklight)(that, curBacklight);
+					IOSleep(10); // Wait 5 miliseconds
+				}
+			} else {
+				while (curBacklight > delta && (curBacklight -= delta) > newBacklight) {
+					DBGLOG("smoother", "wrapHwSetBacklight set backlight 0x%x step %d", curBacklight, delta);
+					ADDPR(orgHwSetBacklight)(that, curBacklight);
+					IOSleep(10); // Wait 5 miliseconds
+				}
+			}
+		}
+	}
+
+	ADDPR(backlightValue) = *backlight;
+	ADDPR(backlightValueAssigned) = true;
+	ADDPR(orgHwSetBacklight)(that, *backlight);
+
+	return kIOReturnSuccess;
+}
+
+void ADDPR(processKext)(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+	if ((ADDPR(currentFramebuffer) && ADDPR(currentFramebuffer)->loadIndex == index) ||
+		(ADDPR(currentFramebufferOpt) && ADDPR(currentFramebufferOpt)->loadIndex == index)) {
+		// Find actual framebuffer used
+		auto realFramebuffer = (ADDPR(currentFramebuffer) && ADDPR(currentFramebuffer)->loadIndex == index) ? ADDPR(currentFramebuffer) : ADDPR(currentFramebufferOpt);
+
+		// Find hwSetBacklight symbol
+		auto hwSetBacklightSym = "";
+		if (realFramebuffer == &kextIntelSNBFb) { // Sandy Bridge
+			hwSetBacklightSym = ""; //FIXME: find the symbol
+		} else if (realFramebuffer == &kextIntelCapriFb) { // Ivy Bridge
+			hwSetBacklightSym = "__ZN25AppleIntelCapriController14hwSetBacklightEj";
+		} else if (realFramebuffer == &kextIntelAzulFb) { // Haswell
+			hwSetBacklightSym = "__ZN24AppleIntelAzulController14hwSetBacklightEj";
+		} else if (realFramebuffer == &kextIntelBDWFb) { // Broadwell
+			hwSetBacklightSym = "__ZN22AppleIntelFBController14hwSetBacklightEj";
+		} else if (realFramebuffer == &kextIntelSKLFb) { // Skylake and newer
+			hwSetBacklightSym = "__ZN31AppleIntelFramebufferController14hwSetBacklightEj";
+		}
+
+		// Solve hwSetBacklight symbol
+		auto solvedSymbol = patcher.solveSymbol(index, hwSetBacklightSym, address, size);
+		if (!solvedSymbol) {
+			SYSLOG("smoother", "Failed to find hwSetBacklight");
+			patcher.clearError();
+			return;
+		}
+
+		// Route hwSetBacklight to wrapHwSetBacklight
+		ADDPR(orgHwSetBacklight) = reinterpret_cast<decltype(ADDPR(orgHwSetBacklight))>(patcher.routeFunction(reinterpret_cast<mach_vm_address_t>(solvedSymbol), reinterpret_cast<mach_vm_address_t>(ADDPR(wrapHwSetBacklight)), true));
+		if (!ADDPR(orgHwSetBacklight)) {
+			SYSLOG("smoother", "Failed to route hwSetBacklight");
+			patcher.clearError();
+			return;
+		}
+
+		DBGLOG("smoother", "Successfully routed hwSetBacklight");
+	}
+}
+
+void ADDPR(init_plugin)() {
+	ADDPR(callbackSmoother) = nullptr;
+	ADDPR(cmdGate) = nullptr;
+	ADDPR(orgHwSetBacklight) = nullptr;
+	ADDPR(currentFramebuffer) = ADDPR(currentFramebufferOpt) = nullptr;
+
+	ADDPR(backlightValueAssigned) = false;
+	ADDPR(backlightValue) = 0;
 
 	auto &bdi = BaseDeviceInfo::get();
 	auto generation = bdi.cpuGeneration;
@@ -45,117 +174,80 @@ void Smoother::init() {
 			// Do not warn about legacy processors
 			break;
 		case CPUInfo::CpuGeneration::SandyBridge:
-			currentFramebuffer = &kextIntelSNBFb;
+			ADDPR(currentFramebuffer) = &kextIntelSNBFb;
 			break;
 		case CPUInfo::CpuGeneration::IvyBridge:
-			currentFramebuffer = &kextIntelCapriFb;
+			ADDPR(currentFramebuffer) = &kextIntelCapriFb;
 			break;
 		case CPUInfo::CpuGeneration::Haswell:
-			currentFramebuffer = &kextIntelAzulFb;
+			ADDPR(currentFramebuffer) = &kextIntelAzulFb;
 			break;
 		case CPUInfo::CpuGeneration::Broadwell:
-			currentFramebuffer = &kextIntelBDWFb;
+			ADDPR(currentFramebuffer) = &kextIntelBDWFb;
 			break;
 		case CPUInfo::CpuGeneration::Skylake:
-			currentFramebuffer = &kextIntelSKLFb;
+			ADDPR(currentFramebuffer) = &kextIntelSKLFb;
 			break;
 		case CPUInfo::CpuGeneration::KabyLake:
-			currentFramebuffer = &kextIntelKBLFb;
+			ADDPR(currentFramebuffer) = &kextIntelKBLFb;
 			break;
 		case CPUInfo::CpuGeneration::CoffeeLake:
-			currentFramebuffer = &kextIntelCFLFb;
-			currentFramebufferOpt = &kextIntelKBLFb;
+			ADDPR(currentFramebuffer) = &kextIntelCFLFb;
+			ADDPR(currentFramebufferOpt) = &kextIntelKBLFb;
 			break;
 		case CPUInfo::CpuGeneration::CannonLake:
-			currentFramebuffer = &kextIntelCNLFb;
+			ADDPR(currentFramebuffer) = &kextIntelCNLFb;
 			break;
 		case CPUInfo::CpuGeneration::IceLake:
-			currentFramebuffer = &kextIntelICLLPFb;
-			currentFramebufferOpt = &kextIntelICLHPFb;
+			ADDPR(currentFramebuffer) = &kextIntelICLLPFb;
+			ADDPR(currentFramebufferOpt) = &kextIntelICLHPFb;
 			break;
 		case CPUInfo::CpuGeneration::CometLake:
-			currentFramebuffer = &kextIntelCFLFb;
-			currentFramebufferOpt = &kextIntelKBLFb;
+			ADDPR(currentFramebuffer) = &kextIntelCFLFb;
+			ADDPR(currentFramebufferOpt) = &kextIntelKBLFb;
 			break;
 		default:
 			SYSLOG("smoother", "found an unsupported processor 0x%X:0x%X, please report this!", family, model);
 			break;
 	}
 
-	if (currentFramebuffer)
-		lilu.onKextLoadForce(currentFramebuffer);
+	if (ADDPR(currentFramebuffer))
+		lilu.onKextLoadForce(ADDPR(currentFramebuffer));
 
-	if (currentFramebufferOpt)
-		lilu.onKextLoadForce(currentFramebufferOpt);
+	if (ADDPR(currentFramebufferOpt))
+		lilu.onKextLoadForce(ADDPR(currentFramebufferOpt));
 
 	lilu.onKextLoadForce(nullptr, 0,
 	[](void *user, KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
-		static_cast<Smoother *>(user)->processKext(patcher, index, address, size);
-	}, this);
+		ADDPR(processKext)(patcher, index, address, size);
+	}, nullptr);
 }
 
-IOReturn Smoother::wrapHwSetBacklight(void *that, uint32_t backlight) {
-	callbackSmoother->backlightValueAssigned = true;
-	callbackSmoother->backlightValue = backlight;
-	DBGLOG("smoother", "wrapHwSetBacklight called: backlight 0x%x", backlight);
-	return callbackSmoother->orgHwSetBacklight(that, backlight);
-}
+static const char *bootargOff[] {
+	"-applbklsmoothoff"
+};
 
-void Smoother::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
-	if ((currentFramebuffer && currentFramebuffer->loadIndex == index) ||
-		(currentFramebufferOpt && currentFramebufferOpt->loadIndex == index)) {
-		auto cpuGeneration = BaseDeviceInfo::get().cpuGeneration;
+static const char *bootargDebug[] {
+	"-applbklsmoothdbg"
+};
 
-		// Find actual framebuffer used
-		auto realFramebuffer = (currentFramebuffer && currentFramebuffer->loadIndex == index) ? currentFramebuffer : currentFramebufferOpt;
+static const char *bootargBeta[] {
+	"-applbklsmoothbeta"
+};
 
-		if (cpuGeneration == CPUInfo::CpuGeneration::SandyBridge) {
-			gPlatformInformationList = patcher.solveSymbol<void *>(index, "_PlatformInformationList", address, size);
-		} else {
-			gPlatformInformationList = patcher.solveSymbol<void *>(index, "_gPlatformInformationList", address, size);
-		}
-
-		// Find max backlight frequency and hwSetBacklight symbol
-		auto hwSetBacklightSym = "";
-		if (realFramebuffer == &kextIntelSNBFb) { // Sandy Bridge
-			maxBacklightFrequency = static_cast<FramebufferSNB *>(gPlatformInformationList)[0].fBacklightMax;
-			hwSetBacklightSym = ""; //FIXME: find the symbol
-		} else if (realFramebuffer == &kextIntelCapriFb) { // Ivy Bridge
-			maxBacklightFrequency = static_cast<FramebufferIVB *>(gPlatformInformationList)[0].fBacklightMax;
-			hwSetBacklightSym = "__ZN25AppleIntelCapriController14hwSetBacklightEj";
-		} else if (realFramebuffer == &kextIntelAzulFb) { // Haswell
-			maxBacklightFrequency = static_cast<FramebufferHSW *>(gPlatformInformationList)[0].fBacklightMax;
-			hwSetBacklightSym = "__ZN24AppleIntelAzulController14hwSetBacklightEj";
-		} else if (realFramebuffer == &kextIntelBDWFb) { // Broadwell
-			maxBacklightFrequency = static_cast<FramebufferBDW *>(gPlatformInformationList)[0].fBacklightMax;
-			hwSetBacklightSym = "";
-		} else if (realFramebuffer == &kextIntelSKLFb) { // Skylake
-			maxBacklightFrequency = static_cast<FramebufferSKL *>(gPlatformInformationList)[0].fBacklightMax;
-			hwSetBacklightSym = "__ZN31AppleIntelFramebufferController14hwSetBacklightEj";
-		} else if (realFramebuffer == &kextIntelKBLFb) { // Kaby Lake
-			maxBacklightFrequency = static_cast<FramebufferSKL *>(gPlatformInformationList)[0].fBacklightMax;
-			hwSetBacklightSym = "__ZN31AppleIntelFramebufferController14hwSetBacklightEj";
-		} else { // Coffee Lake and newer
-			//FIXME: Find a way to get hardcoded value
-			maxBacklightFrequency = 7777; // or 22222
-			hwSetBacklightSym = "__ZN31AppleIntelFramebufferController14hwSetBacklightEj";
-		}
-
-		DBGLOG("smoother", "maxBacklightFrequency = 0x%x", maxBacklightFrequency);
-		DBGLOG("smoother", "hwSetBacklight symbol %s", hwSetBacklightSym);
-
-		auto solvedSymbol = patcher.solveSymbol(index, hwSetBacklightSym, address, size);
-		if (!solvedSymbol) {
-			SYSLOG("smoother", "Failed to find hwSetBacklight");
-			return;
-		}
-
-		orgHwSetBacklight = reinterpret_cast<decltype(orgHwSetBacklight)>(patcher.routeFunction(reinterpret_cast<mach_vm_address_t>(solvedSymbol), reinterpret_cast<mach_vm_address_t>(wrapHwSetBacklight), true));
-		if (!orgHwSetBacklight) {
-			SYSLOG("smoother", "Failed to route hwSetBacklight");
-			return;
-		}
-
-		DBGLOG("smoother", "Successfully routed hwSetBacklight");
+PluginConfiguration ADDPR(config) {
+	xStringify(PRODUCT_NAME),
+	parseModuleVersion(xStringify(MODULE_VERSION)),
+	LiluAPI::AllowNormal | LiluAPI::AllowInstallerRecovery,
+	bootargOff,
+	arrsize(bootargOff),
+	bootargDebug,
+	arrsize(bootargDebug),
+	bootargBeta,
+	arrsize(bootargBeta),
+	KernelVersion::MountainLion,
+	KernelVersion::BigSur,
+	[]() {
+		ADDPR(init_plugin)();
 	}
-}
+};
