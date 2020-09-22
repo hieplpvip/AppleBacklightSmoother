@@ -46,7 +46,7 @@ IOReturn AppleBacklightSmootherDummy::wrapHwSetBacklightGated(void *that, uint32
 }
 
 IOReturn SmootherData::wrapHwSetBacklight(void *that, uint32_t backlight) {
-	if (!triedCmdGate && !SmootherData::cmdGate && ADDPR(selfInstance)) {
+	if (!triedCmdGate && ADDPR(selfInstance)) {
 		triedCmdGate = true;
 
 		IOWorkLoop* workLoop = ADDPR(selfInstance)->getWorkLoop();
