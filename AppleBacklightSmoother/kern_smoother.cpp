@@ -31,6 +31,7 @@ PRODUCT_NAME *ADDPR(selfInstance) = nullptr;
 
 IOService *PRODUCT_NAME::probe(IOService *provider, SInt32 *score) {
 	ADDPR(selfInstance) = this;
+	setProperty("Copyright", "Copyright © 2020 Le Bao Hiep. All rights reserved.");
 	setProperty("VersionInfo", kextVersion);
 	auto service = IOService::probe(provider, score);
 	return ADDPR(startSuccess) ? service : nullptr;
