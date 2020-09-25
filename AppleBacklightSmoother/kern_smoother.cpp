@@ -81,9 +81,6 @@ void PRODUCT_NAME::dischargeQueue() {
 	auto pair = AppleBacklightSmootherNS::backlightQueue.fetch();
 	AppleBacklightSmootherNS::orgWriteRegister32(pair.first, AppleBacklightSmootherNS::backlightDutyRegister, pair.second);
 	DBGLOG("smoother", "dischargeQueue %0x%x", pair.second);
-#ifdef DEBUG
-	setProperty("Current Duty Cycle", OSNumber::withNumber(pair.second, 32));
-#endif
 	if (AppleBacklightSmootherNS::backlightQueue.count() > 0) {
 		AppleBacklightSmootherNS::smoothTimer->setTimeoutMS(10);
 	}
