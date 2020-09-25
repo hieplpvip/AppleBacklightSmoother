@@ -50,7 +50,7 @@ namespace AppleBacklightSmootherNS {
 	static constexpr uint32_t FallbackTargetBacklightFrequency {120000};
 
 	static bool backlightValueAssigned;
-	static uint32_t currentBacklightValue;
+	static uint32_t lastBacklightValue;
 	static uint32_t targetBacklightFrequency;
 	static uint32_t targetPwmControl;
 	static uint32_t driverBacklightFrequency;
@@ -58,6 +58,11 @@ namespace AppleBacklightSmootherNS {
 	static void init_plugin();
 
 	static void processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
+
+	static constexpr uint32_t START_VALUE = 10;
+	static constexpr uint32_t STEPS = 128;
+	static uint32_t dutyTables[STEPS];
+	static void generateTables();
 
 	static void wrapIvyWriteRegister32(void *that, uint32_t reg, uint32_t value);
 	static void wrapHswWriteRegister32(void *that, uint32_t reg, uint32_t value);

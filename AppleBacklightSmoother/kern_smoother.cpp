@@ -76,7 +76,7 @@ void AppleBacklightSmootherNS::init_plugin() {
 	orgReadRegister32 = nullptr;
 	orgWriteRegister32 = nullptr;
 	backlightValueAssigned = false;
-	currentBacklightValue = 0;
+	lastBacklightValue = 0;
 	targetBacklightFrequency = 0;
 	targetPwmControl = 0;
 	driverBacklightFrequency = 0;
@@ -195,6 +195,14 @@ void AppleBacklightSmootherNS::processKext(KernelPatcher &patcher, size_t index,
 	}
 }
 
+void AppleBacklightSmootherNS::generateTables() {
+	// DUTY = a * STEP ^ 2 + START_VALUE
+	double a = static_cast<double>(targetPwmControl - START_VALUE) / static_cast<double>(STEPS * STEPS);
+	for (int i = 0; i < STEPS; i++) {
+		dutyTables[i] = static_cast<uint32_t>(a * i * i + START_VALUE);
+	}
+}
+
 void AppleBacklightSmootherNS::wrapIvyWriteRegister32(void *that, uint32_t reg, uint32_t value) {
 	if (reg == BXT_BLC_PWM_FREQ1) {
 		if (value && value != driverBacklightFrequency) {
@@ -213,6 +221,8 @@ void AppleBacklightSmootherNS::wrapIvyWriteRegister32(void *that, uint32_t reg, 
 				targetBacklightFrequency = FallbackTargetBacklightFrequency;
 				SYSLOG("smoother", "wrapIvyWriteRegister32: system initialized BXT_BLC_PWM_FREQ1 is ZERO");
 			}
+
+			generateTables();
 		}
 
 		if (value) {
@@ -226,6 +236,9 @@ void AppleBacklightSmootherNS::wrapIvyWriteRegister32(void *that, uint32_t reg, 
 			uint32_t rescaledValue = static_cast<uint32_t>((static_cast<uint64_t>(value) * static_cast<uint64_t>(targetBacklightFrequency)) / static_cast<uint64_t>(driverBacklightFrequency));
 			DBGLOG("smoother", "wrapIvyWriteRegister32: write BLC_PWM_CPU_CTL 0x%x/0x%x, rescaled to 0x%x/0x%x", value, driverBacklightFrequency, rescaledValue, targetBacklightFrequency);
 			value = rescaledValue;
+
+			backlightValueAssigned = true;
+		 lastBacklightValue = rescaledValue;
 		} else {
 			// This should never happen, but in case it does we should log it at the very least.
 			SYSLOG("smoother", "wrapIvyWriteRegister32: write BLC_PWM_CPU_CTL has zero frequency driver (%d) target (%d)", driverBacklightFrequency, targetBacklightFrequency);
@@ -251,12 +264,14 @@ void AppleBacklightSmootherNS::wrapHswWriteRegister32(void *that, uint32_t reg, 
 				targetBacklightFrequency = FallbackTargetBacklightFrequency;
 				SYSLOG("smoother", "wrapHswWriteRegister32: system initialized PWM frequency is ZERO");
 			}
+
+			generateTables();
 		}
 
 		uint32_t dutyCycle = value & 0xffffU;
 		uint32_t frequency = (value & 0xffff0000U) >> 16U;
 
-		uint32_t rescaledDutyCycle = frequency == 0 ? 0 : static_cast<uint32_t>((static_cast<uint64_t>(dutyCycle) * static_cast<uint64_t>(targetBacklightFrequency)) / static_cast<uint64_t>(frequency));
+		uint32_t rescaledValue = frequency == 0 ? 0 : static_cast<uint32_t>((static_cast<uint64_t>(dutyCycle) * static_cast<uint64_t>(targetBacklightFrequency)) / static_cast<uint64_t>(frequency));
 
 		if (frequency) {
 			// Nonzero writes to frequency need to use the original system frequency.
@@ -266,7 +281,10 @@ void AppleBacklightSmootherNS::wrapHswWriteRegister32(void *that, uint32_t reg, 
 
 		// Write the rescaled duty cycle and frequency
 		// FIXME: what if rescaled duty cycle overflow unsigned 16 bit int?
-		value = (frequency << 16U) | rescaledDutyCycle;
+		value = (frequency << 16U) | rescaledValue;
+
+		backlightValueAssigned = true;
+		lastBacklightValue = rescaledValue;
 	}
 
 	orgWriteRegister32(that, reg, value);
@@ -290,6 +308,8 @@ void AppleBacklightSmootherNS::wrapCflRealWriteRegister32(void *that, uint32_t r
 				targetBacklightFrequency = FallbackTargetBacklightFrequency;
 				SYSLOG("smoother", "wrapCflRealWriteRegister32: system initialized BXT_BLC_PWM_FREQ1 is ZERO");
 			}
+
+			generateTables();
 		}
 
 		if (value) {
@@ -303,6 +323,9 @@ void AppleBacklightSmootherNS::wrapCflRealWriteRegister32(void *that, uint32_t r
 			uint32_t rescaledValue = static_cast<uint32_t>((static_cast<uint64_t>(value) * static_cast<uint64_t>(targetBacklightFrequency)) / static_cast<uint64_t>(driverBacklightFrequency));
 			DBGLOG("smoother", "wrapCflRealWriteRegister32: write PWM_DUTY1 0x%x/0x%x, rescaled to 0x%x/0x%x", value, driverBacklightFrequency, rescaledValue, targetBacklightFrequency);
 			value = rescaledValue;
+
+			backlightValueAssigned = true;
+			lastBacklightValue = rescaledValue;
 		} else {
 			// This should never happen, but in case it does we should log it at the very least.
 			SYSLOG("smoother", "wrapCflRealWriteRegister32: write PWM_DUTY1 has zero frequency driver (%d) target (%d)", driverBacklightFrequency, targetBacklightFrequency);
@@ -325,6 +348,8 @@ void AppleBacklightSmootherNS::wrapCflFakeWriteRegister32(void *that, uint32_t r
 				targetBacklightFrequency = FallbackTargetBacklightFrequency;
 				SYSLOG("smoother", "wrapCflFakeWriteRegister32: system initialized BXT_BLC_PWM_FREQ1 is ZERO");
 			}
+
+			generateTables();
 		}
 
 		// For the KBL driver, 0xc8254 (BLC_PWM_PCH_CTL2) controls the backlight intensity.
@@ -343,6 +368,9 @@ void AppleBacklightSmootherNS::wrapCflFakeWriteRegister32(void *that, uint32_t r
 		// Finish by writing the duty cycle.
 		reg = BXT_BLC_PWM_DUTY1;
 		value = rescaledValue;
+
+		backlightValueAssigned = true;
+		lastBacklightValue = rescaledValue;
 	} else if (reg == BXT_BLC_PWM_CTL1) {
 		if (targetPwmControl == 0) {
 			// Save the original hardware PWM control value
