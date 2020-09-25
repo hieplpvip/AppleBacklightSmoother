@@ -13,6 +13,16 @@ matrix:
       - xcodebuild -jobs 1 -configuration Debug
       - xcodebuild -jobs 1 -configuration Release
 
+    deploy:
+      provider: releases
+      skip_cleanup: true
+      file: "build/*/*.zip"
+      file_glob: true
+      api_key:
+        secure: bZ4Es2/Cifpy6zmnX4Iz5wAQXTEixc/cXMqJiuPDW1wQnTVxNRrXEFkNlIjK/b83r2vxeFOwmhyRYeyYxQa3ILc89BTnTCun2/PALLYKspr2DvLv+Vt6gn530czdizgJeI7NPRjYyVbwqrebdE6jlCGFmcpN8XRr62x+hvbGUovU05kxvKOrpPHrr/aJc25Bb8Dvzz9V4g7qiYQe+qOnAWGXnDup827OiXUjuifjyZXaSmV/O6VIhFh5V08vVinF5iIzClHIeX4AdC3g/cBy3y4AfMYZoykzWyw6tOraw4ragV4ufXf3+FjhsOWK351vLR02dU/Aq7sUUZvcPvf0z4b69XIhD3knh0iuXaKv5ZSzQviAP1hgpn8xRiDlqWQ1vC6dihYMO35Ac2dH9vv23dvzRnBvVESkKwOJLvwpIeSDIwKqIl6EkXey2XjjT+4lPpQdPx0nRYavBlGXVLv3wDJqQTCGX2gg3B/eL3Z7F0LXjOC23jNnCHFUY/Np/TizjJDFrL42FNLcXQNQpfTruxOaK0wmOjvI9Psomtb6t8ZI4Zo32yXBC0tRhI7q4srgHGNctcP5/GKNCJ8IqC+OhIVLTaAZ36vz6k5M21gyXIfzG2EdxjEQP5O8ClcJpZ1DMMxbDmmzEPA2cqoKuxnF5vENsKJB0MVkoaqncS58NnQ=
+      on:
+        tags: true
+
   - os: osx
     name: "Analyze Clang"
     osx_image: xcode11
