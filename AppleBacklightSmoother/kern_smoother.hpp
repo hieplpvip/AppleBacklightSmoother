@@ -37,34 +37,35 @@ static constexpr uint32_t BXT_BLC_PWM_CTL1 = 0xC8250;
 static constexpr uint32_t BXT_BLC_PWM_FREQ1 = 0xC8254;
 static constexpr uint32_t BXT_BLC_PWM_DUTY1 = 0xC8258;
 
-template <typename X, typename Y>
-struct SimplePair {
+template <typename X, typename Y, typename Z>
+struct SimpleTriple {
 	X first;
 	Y second;
+	Z third;
 
-	inline SimplePair() {}
-	inline SimplePair(const X &first, const Y &second): first(first), second(second) {}
+	inline SimpleTriple() {}
+	inline SimpleTriple(const X &first, const Y &second, const Z &third): first(first), second(second), third(third) {}
 };
 
 template <class T, unsigned N>
 class SimpleQueue {
 private:
 	T m_buffer[N];
-	volatile unsigned m_head;   // m_head is volatile: commonly accessed at interrupt time
-	unsigned m_tail;
-	inline unsigned count(unsigned head, unsigned tail) {
-		return (head >= tail) ? (head - tail) : (N - tail + head);
-	}
+	unsigned m_head, m_tail;
 
 public:
 	inline SimpleQueue() { reset(); }
-	void reset() {
+	inline void reset() {
 		m_head = 0;
 		m_tail = 0;
 	}
-	inline unsigned count() { return count(m_head, m_tail); }
-	void push(T data) {
-		// add new data to head, check for overflow.
+	inline unsigned count() {
+		return (m_head >= m_tail) ? (m_head - m_tail) : (N - m_tail + m_head);
+	}
+	inline bool isEmpty() {
+		return (m_head == m_tail);
+	}
+	void push(const T &data) {
 		unsigned new_head = m_head + 1;
 		if (new_head >= N) new_head = 0;
 		if (new_head != m_tail) {
@@ -73,10 +74,8 @@ public:
 		}
 	}
 	T fetch() {
-		// grab new data from tail, no check for underflow.
 		T result = m_buffer[m_tail++];
-		if (m_tail >= N)
-			m_tail = 0;
+		if (m_tail >= N) m_tail = 0;
 		return result;
 	}
 };
@@ -95,22 +94,25 @@ namespace AppleBacklightSmootherNS {
 	static constexpr uint32_t FallbackTargetBacklightFrequency {120000};
 
 	static bool backlightValueAssigned;
-	static uint32_t lastBacklightValue;
+	static uint32_t lastRequestedBacklightValue;
+	static uint32_t currentBacklightValue;
 	static uint32_t targetBacklightFrequency;
 	static uint32_t targetPwmControl;
 	static uint32_t driverBacklightFrequency;
 	static uint32_t backlightDutyRegister;
-	static SimpleQueue<SimplePair<void *, uint32_t>, 2048> backlightQueue;
+	static SimpleQueue<SimpleTriple<void *, uint32_t, uint32_t>, 2048> backlightQueue;
 
 	static void init_plugin();
 
 	static void processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
 
 	static constexpr uint32_t START_VALUE = 10;
-	static constexpr uint32_t STEPS = 128;
+	static constexpr uint32_t STEPS = 200;
 	static constexpr uint32_t DELAYMS = 10;
 	static uint32_t dutyTables[STEPS];
 	static void generateTables();
+	inline static int lowerBound(uint32_t *data, int from, int to, int value);
+	inline static int upperBound(uint32_t *data, int from, int to, int value);
 	static void pushQueue(void *that, uint32_t value, uint32_t mask = 0);
 
 	static void wrapIvyWriteRegister32(void *that, uint32_t reg, uint32_t value);

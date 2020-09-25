@@ -78,10 +78,21 @@ void PRODUCT_NAME::stop(IOService *provider) {
 
 void PRODUCT_NAME::dischargeQueue() {
 	IORecursiveLockLock(AppleBacklightSmootherNS::lockSmooth);
-	auto pair = AppleBacklightSmootherNS::backlightQueue.fetch();
-	AppleBacklightSmootherNS::orgWriteRegister32(pair.first, AppleBacklightSmootherNS::backlightDutyRegister, pair.second);
-	DBGLOG("smoother", "dischargeQueue %0x%x", pair.second);
-	if (AppleBacklightSmootherNS::backlightQueue.count() > 0) {
+	while (!AppleBacklightSmootherNS::backlightQueue.isEmpty()) {
+#define IMIN(A, B) ((A < B) ? (A) : (B))
+#define IMAX(A, B) ((A > B) ? (A) : (B))
+		auto pair = AppleBacklightSmootherNS::backlightQueue.fetch();
+		if (pair.third > IMIN(AppleBacklightSmootherNS::currentBacklightValue, AppleBacklightSmootherNS::lastRequestedBacklightValue) &&
+			pair.third < IMAX(AppleBacklightSmootherNS::currentBacklightValue, AppleBacklightSmootherNS::lastRequestedBacklightValue)) {
+			AppleBacklightSmootherNS::orgWriteRegister32(pair.first, AppleBacklightSmootherNS::backlightDutyRegister, pair.second);
+			AppleBacklightSmootherNS::currentBacklightValue = pair.third;
+			DBGLOG("smoother", "dischargeQueue set backlight register 0x%x to %0x%x", AppleBacklightSmootherNS::backlightDutyRegister, pair.second);
+			break;
+		}
+#undef IMIN
+#undef IMAX
+	}
+	if (!AppleBacklightSmootherNS::backlightQueue.isEmpty()) {
 		AppleBacklightSmootherNS::smoothTimer->setTimeoutMS(AppleBacklightSmootherNS::DELAYMS);
 	}
 	IORecursiveLockUnlock(AppleBacklightSmootherNS::lockSmooth);
@@ -96,7 +107,8 @@ void AppleBacklightSmootherNS::init_plugin() {
 	orgReadRegister32 = nullptr;
 	orgWriteRegister32 = nullptr;
 	backlightValueAssigned = false;
-	lastBacklightValue = 0;
+	lastRequestedBacklightValue = 0;
+	currentBacklightValue = 0;
 	targetBacklightFrequency = 0;
 	targetPwmControl = 0;
 	driverBacklightFrequency = 0;
@@ -231,6 +243,34 @@ void AppleBacklightSmootherNS::generateTables() {
 	}
 }
 
+int AppleBacklightSmootherNS::lowerBound(uint32_t *data, int from, int to, int value) {
+	int result = to--, mid;
+	while (from <= to) {
+		mid = (from + to) >> 1;
+		if (data[mid] >= value) {
+			result = mid;
+			to = mid - 1;
+		} else {
+			from = mid + 1;
+		}
+	}
+	return result;
+}
+
+int AppleBacklightSmootherNS::upperBound(uint32_t *data, int from, int to, int value) {
+	int result = to--, mid;
+	while (from <= to) {
+		mid = (from + to) >> 1;
+		if (data[mid] > value) {
+			result = mid;
+			to = mid - 1;
+		} else {
+			from = mid + 1;
+		}
+	}
+	return result;
+}
+
 void AppleBacklightSmootherNS::pushQueue(void *that, uint32_t value, uint32_t mask) {
 #ifdef DEBUG
 	if (!loggedFrequency && ADDPR(selfInstance)) {
@@ -247,35 +287,38 @@ void AppleBacklightSmootherNS::pushQueue(void *that, uint32_t value, uint32_t ma
 	}
 #endif
 
-	IORecursiveLockLock(lockSmooth);
-	bool isQueueEmpty = backlightQueue.count() == 0;
-
-	//FIXME: Use binary search
-	if (lastBacklightValue < value) {
-		int from = 0;
-		while (from < STEPS && dutyTables[from] <= lastBacklightValue) ++from;
-
-		int to = STEPS  - 1;
-		while (to >= 0 && dutyTables[to] >= value) --to;
-
-		for (int i = from; i <= to; i++) {
-			backlightQueue.push(SimplePair<void *, uint32_t>(that, mask | dutyTables[i]));
-		}
-		backlightQueue.push(SimplePair<void *, uint32_t>(that, mask | value));
-	} else {
-		int from = STEPS - 1;
-		while (from >= 0 && dutyTables[from] >= lastBacklightValue) --from;
-
-		int to = 0;
-		while (to < STEPS && dutyTables[to] <= value) ++to;
-
-		for (int i = from; i >= to; i--) {
-			backlightQueue.push(SimplePair<void *, uint32_t>(that, mask | dutyTables[i]));
-		}
-		backlightQueue.push(SimplePair<void *, uint32_t>(that, mask | value));
+	if (lastRequestedBacklightValue == value) {
+		return;
 	}
 
-	lastBacklightValue = value;
+	IORecursiveLockLock(lockSmooth);
+	bool isQueueEmpty = backlightQueue.isEmpty();
+
+	if (lastRequestedBacklightValue < value) {
+		int from = upperBound(dutyTables, 0, STEPS, lastRequestedBacklightValue);
+		int to = lowerBound(dutyTables, 0, STEPS, value) - 1;
+
+		if (from < STEPS && to < STEPS) {
+			for (int i = from; i <= to; i++) {
+				backlightQueue.push(SimpleTriple<void *, uint32_t, uint32_t>(that, mask | dutyTables[i], dutyTables[i]));
+			}
+		}
+
+		backlightQueue.push(SimpleTriple<void *, uint32_t, uint32_t>(that, mask | value, value));
+	} else { // lastRequestedBacklightValue > value
+		int from = lowerBound(dutyTables, 0, STEPS, lastRequestedBacklightValue) - 1;
+		int to = upperBound(dutyTables, 0, STEPS, value);
+
+		if (from < STEPS && to < STEPS) {
+			for (int i = from; i >= to; i--) {
+				backlightQueue.push(SimpleTriple<void *, uint32_t, uint32_t>(that, mask | dutyTables[i], dutyTables[i]));
+			}
+		}
+
+		backlightQueue.push(SimpleTriple<void *, uint32_t, uint32_t>(that, mask | value, value));
+	}
+
+	lastRequestedBacklightValue = value;
 
 	if (isQueueEmpty) {
 		smoothTimer->setTimeoutMS(DELAYMS);
@@ -324,7 +367,7 @@ void AppleBacklightSmootherNS::wrapIvyWriteRegister32(void *that, uint32_t reg, 
 
 			value = rescaledValue;
 			backlightValueAssigned = true;
-			lastBacklightValue = rescaledValue;
+			lastRequestedBacklightValue = currentBacklightValue = rescaledValue;
 		} else {
 			// This should never happen, but in case it does we should log it at the very least.
 			SYSLOG("smoother", "wrapIvyWriteRegister32: write BLC_PWM_CPU_CTL has zero frequency driver (%d) target (%d)", driverBacklightFrequency, targetBacklightFrequency);
@@ -380,7 +423,7 @@ void AppleBacklightSmootherNS::wrapHswWriteRegister32(void *that, uint32_t reg, 
 		// FIXME: what if rescaled duty cycle overflow unsigned 16 bit int?
 		value = (frequency << 16U) | rescaledValue;
 		backlightValueAssigned = true;
-		lastBacklightValue = rescaledValue;
+		lastRequestedBacklightValue = currentBacklightValue = rescaledValue;
 	}
 
 	orgWriteRegister32(that, reg, value);
@@ -426,7 +469,7 @@ void AppleBacklightSmootherNS::wrapCflRealWriteRegister32(void *that, uint32_t r
 
 			value = rescaledValue;
 			backlightValueAssigned = true;
-			lastBacklightValue = rescaledValue;
+			lastRequestedBacklightValue = currentBacklightValue = rescaledValue;
 		} else {
 			// This should never happen, but in case it does we should log it at the very least.
 			SYSLOG("smoother", "wrapCflRealWriteRegister32: write PWM_DUTY1 has zero frequency driver (%d) target (%d)", driverBacklightFrequency, targetBacklightFrequency);
@@ -475,7 +518,7 @@ void AppleBacklightSmootherNS::wrapCflFakeWriteRegister32(void *that, uint32_t r
 		reg = BXT_BLC_PWM_DUTY1;
 		value = rescaledValue;
 		backlightValueAssigned = true;
-		lastBacklightValue = rescaledValue;
+		lastRequestedBacklightValue = currentBacklightValue = rescaledValue;
 	} else if (reg == BXT_BLC_PWM_CTL1) {
 		if (targetPwmControl == 0) {
 			// Save the original hardware PWM control value
