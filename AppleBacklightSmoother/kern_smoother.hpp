@@ -106,9 +106,9 @@ namespace AppleBacklightSmootherNS {
 
 	static void processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
 
-	static constexpr uint32_t START_VALUE = 10;
-	static constexpr uint32_t STEPS = 200;
-	static constexpr uint32_t DELAYMS = 10;
+	static constexpr uint32_t START_VALUE = 5;
+	static constexpr uint32_t STEPS = 256;
+	static constexpr uint32_t DELAYMS = 7;
 	static uint32_t dutyTables[STEPS];
 	static void generateTables();
 	inline static int lowerBound(uint32_t *data, int from, int to, int value);
