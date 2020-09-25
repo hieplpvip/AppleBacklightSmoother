@@ -9,6 +9,8 @@
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_devinfo.hpp>
 #include <IOKit/IOCommandGate.h>
+#include <IOKit/IOTimerEventSource.h>
+#include <IOKit/IOLocks.h>
 
 #include "kern_smoother.hpp"
 
@@ -41,15 +43,21 @@ bool PRODUCT_NAME::start(IOService *provider) {
 		return false;
 	}
 
+	AppleBacklightSmootherNS::lockSmooth = IORecursiveLockAlloc();
+	if (!AppleBacklightSmootherNS::lockSmooth) {
+		SYSLOG("start", "failed to allocate lock");
+		return false;
+	}
+
 	AppleBacklightSmootherNS::workLoop = getWorkLoop();
 	if (!AppleBacklightSmootherNS::workLoop) {
 		SYSLOG("start", "failed to get workloop");
 		return false;
 	}
 
-	AppleBacklightSmootherNS::cmdGate = IOCommandGate::commandGate(this);
-	if (!AppleBacklightSmootherNS::cmdGate || AppleBacklightSmootherNS::workLoop->addEventSource(AppleBacklightSmootherNS::cmdGate) != kIOReturnSuccess) {
-		SYSLOG("start", "failed to open command gate");
+	AppleBacklightSmootherNS::smoothTimer = IOTimerEventSource::timerEventSource(this, OSMemberFunctionCast(IOTimerEventSource::Action, nullptr, &PRODUCT_NAME::dischargeQueue));
+	if (!AppleBacklightSmootherNS::smoothTimer || AppleBacklightSmootherNS::workLoop->addEventSource(AppleBacklightSmootherNS::smoothTimer) != kIOReturnSuccess) {
+		SYSLOG("start", "failed to create smooth timer");
 		return false;
 	}
 
@@ -58,9 +66,9 @@ bool PRODUCT_NAME::start(IOService *provider) {
 
 void PRODUCT_NAME::stop(IOService *provider) {
 	ADDPR(selfInstance) = nullptr;
-	if (AppleBacklightSmootherNS::cmdGate) {
-		AppleBacklightSmootherNS::workLoop->removeEventSource(AppleBacklightSmootherNS::cmdGate);
-		OSSafeReleaseNULL(AppleBacklightSmootherNS::cmdGate);
+	if (AppleBacklightSmootherNS::smoothTimer) {
+		AppleBacklightSmootherNS::workLoop->removeEventSource(AppleBacklightSmootherNS::smoothTimer);
+		OSSafeReleaseNULL(AppleBacklightSmootherNS::smoothTimer);
 	}
 	if (AppleBacklightSmootherNS::workLoop) {
 		OSSafeReleaseNULL(AppleBacklightSmootherNS::workLoop);
@@ -68,9 +76,24 @@ void PRODUCT_NAME::stop(IOService *provider) {
 	IOService::stop(provider);
 }
 
+void PRODUCT_NAME::dischargeQueue() {
+	IORecursiveLockLock(AppleBacklightSmootherNS::lockSmooth);
+	auto pair = AppleBacklightSmootherNS::backlightQueue.fetch();
+	AppleBacklightSmootherNS::orgWriteRegister32(pair.first, AppleBacklightSmootherNS::backlightDutyRegister, pair.second);
+	DBGLOG("smoother", "dischargeQueue %0x%x", pair.second);
+#ifdef DEBUG
+	setProperty("Current Duty Cycle", OSNumber::withNumber(pair.second, 32));
+#endif
+	if (AppleBacklightSmootherNS::backlightQueue.count() > 0) {
+		AppleBacklightSmootherNS::smoothTimer->setTimeoutMS(10);
+	}
+	IORecursiveLockUnlock(AppleBacklightSmootherNS::lockSmooth);
+}
+
 void AppleBacklightSmootherNS::init_plugin() {
 	workLoop = nullptr;
-	cmdGate = nullptr;
+	smoothTimer = nullptr;
+	lockSmooth = nullptr;
 	currentFramebuffer = nullptr;
 	currentFramebufferOpt = nullptr;
 	orgReadRegister32 = nullptr;
@@ -80,6 +103,11 @@ void AppleBacklightSmootherNS::init_plugin() {
 	targetBacklightFrequency = 0;
 	targetPwmControl = 0;
 	driverBacklightFrequency = 0;
+	backlightDutyRegister = 0;
+
+#ifdef DEBUG
+	loggedFrequency = false;
+#endif
 
 	auto &bdi = BaseDeviceInfo::get();
 	auto generation = bdi.cpuGeneration;
@@ -171,14 +199,17 @@ void AppleBacklightSmootherNS::processKext(KernelPatcher &patcher, size_t index,
 		decltype(wrapIvyWriteRegister32) *wrapWriteRegister32;
 		if (cpuGeneration <= CPUInfo::CpuGeneration::IvyBridge) {
 			wrapWriteRegister32 = wrapIvyWriteRegister32;
+			backlightDutyRegister = BLC_PWM_CPU_CTL;
 		} else if (cpuGeneration <= CPUInfo::CpuGeneration::KabyLake) {
 			wrapWriteRegister32 = wrapHswWriteRegister32;
+			backlightDutyRegister = BXT_BLC_PWM_FREQ1;
 		} else {
 			if (realFramebuffer == &kextIntelCFLFb) {
 				wrapWriteRegister32 = wrapCflRealWriteRegister32;
 			} else {
 				wrapWriteRegister32 = wrapCflFakeWriteRegister32;
 			}
+			backlightDutyRegister = BXT_BLC_PWM_DUTY1;
 		}
 
 		// Route WriteRegister32
@@ -197,10 +228,63 @@ void AppleBacklightSmootherNS::processKext(KernelPatcher &patcher, size_t index,
 
 void AppleBacklightSmootherNS::generateTables() {
 	// DUTY = a * STEP ^ 2 + START_VALUE
-	double a = static_cast<double>(targetPwmControl - START_VALUE) / static_cast<double>(STEPS * STEPS);
+	double a = static_cast<double>(targetBacklightFrequency - START_VALUE) / static_cast<double>(STEPS * STEPS);
 	for (int i = 0; i < STEPS; i++) {
 		dutyTables[i] = static_cast<uint32_t>(a * i * i + START_VALUE);
 	}
+}
+
+void AppleBacklightSmootherNS::pushQueue(void *that, uint32_t value, uint32_t mask) {
+#ifdef DEBUG
+	if (!loggedFrequency && ADDPR(selfInstance)) {
+		loggedFrequency = true;
+		ADDPR(selfInstance)->setProperty("Target Backlight Frequency", OSNumber::withNumber(targetBacklightFrequency, 32));
+		ADDPR(selfInstance)->setProperty("Target PWM Control", OSNumber::withNumber(targetPwmControl, 32));
+		ADDPR(selfInstance)->setProperty("Driver Backlight Frequency", OSNumber::withNumber(driverBacklightFrequency, 32));
+
+		OSArray *dutyTablesArray = OSArray::withCapacity(STEPS);
+		for (int i = 0; i < STEPS; i++) {
+			dutyTablesArray->setObject(OSNumber::withNumber(dutyTables[i], 32));
+		}
+		ADDPR(selfInstance)->setProperty("Duty Tables", dutyTablesArray);
+	}
+#endif
+
+	IORecursiveLockLock(lockSmooth);
+	bool isQueueEmpty = backlightQueue.count() == 0;
+
+	//FIXME: Use binary search
+	if (lastBacklightValue < value) {
+		int from = 0;
+		while (from < STEPS && dutyTables[from] <= lastBacklightValue) ++from;
+
+		int to = STEPS  - 1;
+		while (to >= 0 && dutyTables[to] >= value) --to;
+
+		for (int i = from; i <= to; i++) {
+			backlightQueue.push(SimplePair<void *, uint32_t>(that, mask | dutyTables[i]));
+		}
+		backlightQueue.push(SimplePair<void *, uint32_t>(that, mask | value));
+	} else {
+		int from = STEPS - 1;
+		while (from >= 0 && dutyTables[from] >= lastBacklightValue) --from;
+
+		int to = 0;
+		while (to < STEPS && dutyTables[to] <= value) ++to;
+
+		for (int i = from; i >= to; i--) {
+			backlightQueue.push(SimplePair<void *, uint32_t>(that, mask | dutyTables[i]));
+		}
+		backlightQueue.push(SimplePair<void *, uint32_t>(that, mask | value));
+	}
+
+	lastBacklightValue = value;
+
+	if (isQueueEmpty) {
+		smoothTimer->setTimeoutMS(10);
+	}
+
+	IORecursiveLockUnlock(lockSmooth);
 }
 
 void AppleBacklightSmootherNS::wrapIvyWriteRegister32(void *that, uint32_t reg, uint32_t value) {
@@ -235,10 +319,15 @@ void AppleBacklightSmootherNS::wrapIvyWriteRegister32(void *that, uint32_t reg, 
 			// Translate the PWM duty cycle between the driver scale value and the HW scale value
 			uint32_t rescaledValue = static_cast<uint32_t>((static_cast<uint64_t>(value) * static_cast<uint64_t>(targetBacklightFrequency)) / static_cast<uint64_t>(driverBacklightFrequency));
 			DBGLOG("smoother", "wrapIvyWriteRegister32: write BLC_PWM_CPU_CTL 0x%x/0x%x, rescaled to 0x%x/0x%x", value, driverBacklightFrequency, rescaledValue, targetBacklightFrequency);
-			value = rescaledValue;
 
+			if (lockSmooth && backlightValueAssigned) {
+				pushQueue(that, rescaledValue);
+				return;
+			}
+
+			value = rescaledValue;
 			backlightValueAssigned = true;
-		 lastBacklightValue = rescaledValue;
+			lastBacklightValue = rescaledValue;
 		} else {
 			// This should never happen, but in case it does we should log it at the very least.
 			SYSLOG("smoother", "wrapIvyWriteRegister32: write BLC_PWM_CPU_CTL has zero frequency driver (%d) target (%d)", driverBacklightFrequency, targetBacklightFrequency);
@@ -271,7 +360,13 @@ void AppleBacklightSmootherNS::wrapHswWriteRegister32(void *that, uint32_t reg, 
 		uint32_t dutyCycle = value & 0xffffU;
 		uint32_t frequency = (value & 0xffff0000U) >> 16U;
 
+		if (frequency && frequency != driverBacklightFrequency) {
+			DBGLOG("smoother", "wrapHswWriteRegister32: driver requested max frequency = 0x%x", frequency);
+			driverBacklightFrequency = frequency;
+		}
+
 		uint32_t rescaledValue = frequency == 0 ? 0 : static_cast<uint32_t>((static_cast<uint64_t>(dutyCycle) * static_cast<uint64_t>(targetBacklightFrequency)) / static_cast<uint64_t>(frequency));
+		DBGLOG("smoother", "wrapHswWriteRegister32: write BXT_BLC_PWM_FREQ1 0x%x/0x%x, rescaled to 0x%x/0x%x", dutyCycle, driverBacklightFrequency, rescaledValue, targetBacklightFrequency);
 
 		if (frequency) {
 			// Nonzero writes to frequency need to use the original system frequency.
@@ -279,10 +374,14 @@ void AppleBacklightSmootherNS::wrapHswWriteRegister32(void *that, uint32_t reg, 
 			frequency = targetBacklightFrequency;
 		}
 
+		if (lockSmooth && backlightValueAssigned) {
+			pushQueue(that, rescaledValue, (frequency << 16U));
+			return;
+		}
+
 		// Write the rescaled duty cycle and frequency
 		// FIXME: what if rescaled duty cycle overflow unsigned 16 bit int?
 		value = (frequency << 16U) | rescaledValue;
-
 		backlightValueAssigned = true;
 		lastBacklightValue = rescaledValue;
 	}
@@ -322,8 +421,13 @@ void AppleBacklightSmootherNS::wrapCflRealWriteRegister32(void *that, uint32_t r
 			// Translate the PWM duty cycle between the driver scale value and the HW scale value
 			uint32_t rescaledValue = static_cast<uint32_t>((static_cast<uint64_t>(value) * static_cast<uint64_t>(targetBacklightFrequency)) / static_cast<uint64_t>(driverBacklightFrequency));
 			DBGLOG("smoother", "wrapCflRealWriteRegister32: write PWM_DUTY1 0x%x/0x%x, rescaled to 0x%x/0x%x", value, driverBacklightFrequency, rescaledValue, targetBacklightFrequency);
-			value = rescaledValue;
 
+			if (lockSmooth && backlightValueAssigned) {
+				pushQueue(that, rescaledValue);
+				return;
+			}
+
+			value = rescaledValue;
 			backlightValueAssigned = true;
 			lastBacklightValue = rescaledValue;
 		} else {
@@ -365,10 +469,14 @@ void AppleBacklightSmootherNS::wrapCflFakeWriteRegister32(void *that, uint32_t r
 		// zero, we allow that, since it's trying to turn off the backlight PWM for sleep.
 		orgWriteRegister32(that, BXT_BLC_PWM_FREQ1, frequency ? targetBacklightFrequency : 0);
 
+		if (lockSmooth && backlightValueAssigned) {
+			pushQueue(that, rescaledValue);
+			return;
+		}
+
 		// Finish by writing the duty cycle.
 		reg = BXT_BLC_PWM_DUTY1;
 		value = rescaledValue;
-
 		backlightValueAssigned = true;
 		lastBacklightValue = rescaledValue;
 	} else if (reg == BXT_BLC_PWM_CTL1) {

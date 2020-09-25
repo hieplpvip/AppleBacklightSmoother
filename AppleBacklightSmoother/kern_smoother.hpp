@@ -37,9 +37,54 @@ static constexpr uint32_t BXT_BLC_PWM_CTL1 = 0xC8250;
 static constexpr uint32_t BXT_BLC_PWM_FREQ1 = 0xC8254;
 static constexpr uint32_t BXT_BLC_PWM_DUTY1 = 0xC8258;
 
+template <typename X, typename Y>
+struct SimplePair {
+	X first;
+	Y second;
+
+	inline SimplePair() {}
+	inline SimplePair(const X &first, const Y &second): first(first), second(second) {}
+};
+
+template <class T, unsigned N>
+class SimpleQueue {
+private:
+	T m_buffer[N];
+	volatile unsigned m_head;   // m_head is volatile: commonly accessed at interrupt time
+	unsigned m_tail;
+	inline unsigned count(unsigned head, unsigned tail) {
+		return (head >= tail) ? (head - tail) : (N - tail + head);
+	}
+
+public:
+	inline SimpleQueue() { reset(); }
+	void reset() {
+		m_head = 0;
+		m_tail = 0;
+	}
+	inline unsigned count() { return count(m_head, m_tail); }
+	void push(T data) {
+		// add new data to head, check for overflow.
+		unsigned new_head = m_head + 1;
+		if (new_head >= N) new_head = 0;
+		if (new_head != m_tail) {
+			m_buffer[m_head] = data;
+			m_head = new_head;
+		}
+	}
+	T fetch() {
+		// grab new data from tail, no check for underflow.
+		T result = m_buffer[m_tail++];
+		if (m_tail >= N)
+			m_tail = 0;
+		return result;
+	}
+};
+
 namespace AppleBacklightSmootherNS {
 	static IOWorkLoop *workLoop;
-	static IOCommandGate *cmdGate;
+	static IOTimerEventSource *smoothTimer;
+	static IORecursiveLock *lockSmooth;
 
 	static KernelPatcher::KextInfo *currentFramebuffer;
 	static KernelPatcher::KextInfo *currentFramebufferOpt;
@@ -54,6 +99,8 @@ namespace AppleBacklightSmootherNS {
 	static uint32_t targetBacklightFrequency;
 	static uint32_t targetPwmControl;
 	static uint32_t driverBacklightFrequency;
+	static uint32_t backlightDutyRegister;
+	static SimpleQueue<SimplePair<void *, uint32_t>, 2048> backlightQueue;
 
 	static void init_plugin();
 
@@ -63,11 +110,16 @@ namespace AppleBacklightSmootherNS {
 	static constexpr uint32_t STEPS = 128;
 	static uint32_t dutyTables[STEPS];
 	static void generateTables();
+	static void pushQueue(void *that, uint32_t value, uint32_t mask = 0);
 
 	static void wrapIvyWriteRegister32(void *that, uint32_t reg, uint32_t value);
 	static void wrapHswWriteRegister32(void *that, uint32_t reg, uint32_t value);
 	static void wrapCflRealWriteRegister32(void *that, uint32_t reg, uint32_t value);
 	static void wrapCflFakeWriteRegister32(void *that, uint32_t reg, uint32_t value);
+
+#ifdef DEBUG
+	static bool loggedFrequency;
+#endif
 }
 
 class EXPORT PRODUCT_NAME : public IOService {
@@ -76,6 +128,7 @@ public:
 	IOService *probe(IOService *provider, SInt32 *score) override;
 	bool start(IOService *provider) override;
 	void stop(IOService *provider) override;
+	void dischargeQueue();
 };
 
 extern PRODUCT_NAME *ADDPR(selfInstance);
