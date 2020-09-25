@@ -37,13 +37,7 @@ static constexpr uint32_t BXT_BLC_PWM_CTL1 = 0xC8250;
 static constexpr uint32_t BXT_BLC_PWM_FREQ1 = 0xC8254;
 static constexpr uint32_t BXT_BLC_PWM_DUTY1 = 0xC8258;
 
-class EXPORT PRODUCT_NAME : public IOService {
-	OSDeclareDefaultStructors(PRODUCT_NAME)
-public:
-	IOService *probe(IOService *provider, SInt32 *score) override;
-	bool start(IOService *provider) override;
-	void stop(IOService *provider) override;
-
+namespace AppleBacklightSmootherNS {
 	static IOWorkLoop *workLoop;
 	static IOCommandGate *cmdGate;
 
@@ -69,6 +63,14 @@ public:
 	static void wrapHswWriteRegister32(void *that, uint32_t reg, uint32_t value);
 	static void wrapCflRealWriteRegister32(void *that, uint32_t reg, uint32_t value);
 	static void wrapCflFakeWriteRegister32(void *that, uint32_t reg, uint32_t value);
+}
+
+class EXPORT PRODUCT_NAME : public IOService {
+	OSDeclareDefaultStructors(PRODUCT_NAME)
+public:
+	IOService *probe(IOService *provider, SInt32 *score) override;
+	bool start(IOService *provider) override;
+	void stop(IOService *provider) override;
 };
 
 extern PRODUCT_NAME *ADDPR(selfInstance);

@@ -41,14 +41,14 @@ bool PRODUCT_NAME::start(IOService *provider) {
 		return false;
 	}
 
-	workLoop = ADDPR(selfInstance)->getWorkLoop();
-	if (!workLoop) {
+	AppleBacklightSmootherNS::workLoop = getWorkLoop();
+	if (!AppleBacklightSmootherNS::workLoop) {
 		SYSLOG("start", "failed to get workloop");
 		return false;
 	}
 
-	cmdGate = IOCommandGate::commandGate(this);
-	if (!cmdGate || workLoop->addEventSource(cmdGate) != kIOReturnSuccess) {
+	AppleBacklightSmootherNS::cmdGate = IOCommandGate::commandGate(this);
+	if (!AppleBacklightSmootherNS::cmdGate || AppleBacklightSmootherNS::workLoop->addEventSource(AppleBacklightSmootherNS::cmdGate) != kIOReturnSuccess) {
 		SYSLOG("start", "failed to open command gate");
 		return false;
 	}
@@ -58,17 +58,17 @@ bool PRODUCT_NAME::start(IOService *provider) {
 
 void PRODUCT_NAME::stop(IOService *provider) {
 	ADDPR(selfInstance) = nullptr;
-	if (cmdGate) {
-		workLoop->removeEventSource(cmdGate);
-		OSSafeReleaseNULL(cmdGate);
+	if (AppleBacklightSmootherNS::cmdGate) {
+		AppleBacklightSmootherNS::workLoop->removeEventSource(AppleBacklightSmootherNS::cmdGate);
+		OSSafeReleaseNULL(AppleBacklightSmootherNS::cmdGate);
 	}
-	if (workLoop) {
-		OSSafeReleaseNULL(workLoop);
+	if (AppleBacklightSmootherNS::workLoop) {
+		OSSafeReleaseNULL(AppleBacklightSmootherNS::workLoop);
 	}
 	IOService::stop(provider);
 }
 
-void PRODUCT_NAME::init_plugin() {
+void AppleBacklightSmootherNS::init_plugin() {
 	workLoop = nullptr;
 	cmdGate = nullptr;
 	currentFramebuffer = nullptr;
@@ -131,24 +131,26 @@ void PRODUCT_NAME::init_plugin() {
 			break;
 	}
 
-	if (currentFramebuffer)
+	if (currentFramebuffer) {
 		lilu.onKextLoadForce(currentFramebuffer);
+	}
 
 	if (currentFramebufferOpt)
 		lilu.onKextLoadForce(currentFramebufferOpt);
 
 	lilu.onKextLoadForce(nullptr, 0,
 	[](void *user, KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
-		PRODUCT_NAME::processKext(patcher, index, address, size);
+		processKext(patcher, index, address, size);
 	}, nullptr);
 }
 
-void PRODUCT_NAME::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+void AppleBacklightSmootherNS::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
 	if ((currentFramebuffer && currentFramebuffer->loadIndex == index) ||
 		(currentFramebufferOpt && currentFramebufferOpt->loadIndex == index)) {
 		// Find actual framebuffer used
 		auto realFramebuffer = (currentFramebuffer && currentFramebuffer->loadIndex == index) ? currentFramebuffer : currentFramebufferOpt;
 
+		// Find original ReadRegister32
 		orgReadRegister32 = patcher.solveSymbol<decltype(orgReadRegister32)>(index, "__ZN31AppleIntelFramebufferController14ReadRegister32Em", address, size);
 		if (!orgReadRegister32) {
 			SYSLOG("smoother", "Failed to find ReadRegister32");
@@ -156,6 +158,7 @@ void PRODUCT_NAME::processKext(KernelPatcher &patcher, size_t index, mach_vm_add
 			return;
 		}
 
+		// Find original WriteRegister32
 		orgWriteRegister32 = patcher.solveSymbol<decltype(orgWriteRegister32)>(index, "__ZN31AppleIntelFramebufferController15WriteRegister32Emj", address, size);
 		if (!orgReadRegister32) {
 			SYSLOG("smoother", "Failed to find WriteRegister32");
@@ -163,8 +166,7 @@ void PRODUCT_NAME::processKext(KernelPatcher &patcher, size_t index, mach_vm_add
 			return;
 		}
 
-		patcher.eraseCoverageInstPrefix(reinterpret_cast<mach_vm_address_t>(orgWriteRegister32));
-	
+		// Determine which function to route to
 		auto cpuGeneration = BaseDeviceInfo::get().cpuGeneration;
 		decltype(wrapIvyWriteRegister32) *wrapWriteRegister32;
 		if (cpuGeneration <= CPUInfo::CpuGeneration::IvyBridge) {
@@ -179,6 +181,8 @@ void PRODUCT_NAME::processKext(KernelPatcher &patcher, size_t index, mach_vm_add
 			}
 		}
 
+		// Route WriteRegister32
+		patcher.eraseCoverageInstPrefix(reinterpret_cast<mach_vm_address_t>(orgWriteRegister32));
 		orgWriteRegister32 = reinterpret_cast<decltype(orgWriteRegister32)>(patcher.routeFunction(reinterpret_cast<mach_vm_address_t>(orgWriteRegister32), reinterpret_cast<mach_vm_address_t>(wrapWriteRegister32), true));
 
 		if (!orgWriteRegister32) {
@@ -191,7 +195,7 @@ void PRODUCT_NAME::processKext(KernelPatcher &patcher, size_t index, mach_vm_add
 	}
 }
 
-void PRODUCT_NAME::wrapIvyWriteRegister32(void *that, uint32_t reg, uint32_t value) {
+void AppleBacklightSmootherNS::wrapIvyWriteRegister32(void *that, uint32_t reg, uint32_t value) {
 	if (reg == BXT_BLC_PWM_FREQ1) {
 		if (value && value != driverBacklightFrequency) {
 			DBGLOG("smoother", "wrapIvyWriteRegister32: driver requested BXT_BLC_PWM_FREQ1 = 0x%x", value);
@@ -231,7 +235,7 @@ void PRODUCT_NAME::wrapIvyWriteRegister32(void *that, uint32_t reg, uint32_t val
 	orgWriteRegister32(that, reg, value);
 }
 
-void PRODUCT_NAME::wrapHswWriteRegister32(void *that, uint32_t reg, uint32_t value) {
+void AppleBacklightSmootherNS::wrapHswWriteRegister32(void *that, uint32_t reg, uint32_t value) {
 	if (reg == BXT_BLC_PWM_FREQ1) {
 		// BXT_BLC_PWM_FREQ1 controls the backlight intensity.
 		// High 16 of this register are the denominator (frequency), low 16 are the numerator (duty cycle).
@@ -268,7 +272,7 @@ void PRODUCT_NAME::wrapHswWriteRegister32(void *that, uint32_t reg, uint32_t val
 	orgWriteRegister32(that, reg, value);
 }
 
-void PRODUCT_NAME::wrapCflRealWriteRegister32(void *that, uint32_t reg, uint32_t value) {
+void AppleBacklightSmootherNS::wrapCflRealWriteRegister32(void *that, uint32_t reg, uint32_t value) {
 	if (reg == BXT_BLC_PWM_FREQ1) {
 		if (value && value != driverBacklightFrequency) {
 			DBGLOG("smoother", "wrapCflRealWriteRegister32: driver requested BXT_BLC_PWM_FREQ1 = 0x%x", value);
@@ -308,7 +312,7 @@ void PRODUCT_NAME::wrapCflRealWriteRegister32(void *that, uint32_t reg, uint32_t
 	orgWriteRegister32(that, reg, value);
 }
 
-void PRODUCT_NAME::wrapCflFakeWriteRegister32(void *that, uint32_t reg, uint32_t value) {
+void AppleBacklightSmootherNS::wrapCflFakeWriteRegister32(void *that, uint32_t reg, uint32_t value) {
 	if (reg == BXT_BLC_PWM_FREQ1) { // aka BLC_PWM_PCH_CTL2
 		if (targetBacklightFrequency == 0) {
 			// Populate the hardware PWM frequency as initially set up by the system firmware.
@@ -384,6 +388,6 @@ PluginConfiguration ADDPR(config) {
 	KernelVersion::MountainLion,
 	KernelVersion::BigSur,
 	[]() {
-		PRODUCT_NAME::init_plugin();
+		AppleBacklightSmootherNS::init_plugin();
 	}
 };
