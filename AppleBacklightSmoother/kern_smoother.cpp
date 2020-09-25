@@ -68,97 +68,18 @@ void PRODUCT_NAME::stop(IOService *provider) {
 	IOService::stop(provider);
 }
 
-IOReturn PRODUCT_NAME::wrapHwSetBacklightGated(void *that, uint32_t *backlight) {
-	DBGLOG("smoother", "wrapHwSetBacklight called: backlight 0x%x", *backlight);
-
-	if (backlightValueAssigned) {
-		uint32_t curBacklight = backlightValue;
-		uint32_t newBacklight = *backlight;
-		uint32_t diff = (newBacklight > curBacklight) ? (newBacklight - curBacklight) : (curBacklight - newBacklight);
-		if (diff > 0x10) {
-			uint32_t steps = (diff < 0x40) ? 4 : 16;
-			uint32_t delta = diff / steps;
-			if (newBacklight > curBacklight) {
-				while ((curBacklight += delta) < newBacklight) {
-					DBGLOG("smoother", "wrapHwSetBacklight set backlight 0x%x delta %d", curBacklight, delta);
-					orgHwSetBacklight(that, curBacklight);
-					IOSleep(10); // Wait 5 miliseconds
-				}
-			} else {
-				while (curBacklight > delta && (curBacklight -= delta) > newBacklight) {
-					DBGLOG("smoother", "wrapHwSetBacklight set backlight 0x%x step %d", curBacklight, delta);
-					orgHwSetBacklight(that, curBacklight);
-					IOSleep(10); // Wait 5 miliseconds
-				}
-			}
-		}
-	}
-
-	backlightValue = *backlight;
-	backlightValueAssigned = true;
-	orgHwSetBacklight(that, *backlight);
-
-	return kIOReturnSuccess;
-}
-
-IOReturn PRODUCT_NAME::wrapHwSetBacklight(void *that, uint32_t backlight) {
-	if (cmdGate) {
-		cmdGate->runAction(OSMemberFunctionCast(IOCommandGate::Action, ADDPR(selfInstance), &PRODUCT_NAME::wrapHwSetBacklightGated), that, (void *)&backlight);
-	} else {
-		orgHwSetBacklight(that, backlight);
-	}
-
-	return kIOReturnSuccess;
-}
-
-void PRODUCT_NAME::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
-	if ((currentFramebuffer && currentFramebuffer->loadIndex == index) ||
-		(currentFramebufferOpt && currentFramebufferOpt->loadIndex == index)) {
-		// Find actual framebuffer used
-		auto realFramebuffer = (currentFramebuffer && currentFramebuffer->loadIndex == index) ? currentFramebuffer : currentFramebufferOpt;
-
-		// Find hwSetBacklight symbol
-		auto hwSetBacklightSym = "";
-		if (realFramebuffer == &kextIntelSNBFb) { // Sandy Bridge
-			hwSetBacklightSym = ""; //FIXME: find the symbol
-		} else if (realFramebuffer == &kextIntelCapriFb) { // Ivy Bridge
-			hwSetBacklightSym = "__ZN25AppleIntelCapriController14hwSetBacklightEj";
-		} else if (realFramebuffer == &kextIntelAzulFb) { // Haswell
-			hwSetBacklightSym = "__ZN24AppleIntelAzulController14hwSetBacklightEj";
-		} else if (realFramebuffer == &kextIntelBDWFb) { // Broadwell
-			hwSetBacklightSym = "__ZN22AppleIntelFBController14hwSetBacklightEj";
-		} else if (realFramebuffer == &kextIntelSKLFb) { // Skylake and newer
-			hwSetBacklightSym = "__ZN31AppleIntelFramebufferController14hwSetBacklightEj";
-		}
-
-		// Solve hwSetBacklight symbol
-		auto solvedSymbol = patcher.solveSymbol(index, hwSetBacklightSym, address, size);
-		if (!solvedSymbol) {
-			SYSLOG("smoother", "Failed to find hwSetBacklight");
-			patcher.clearError();
-			return;
-		}
-
-		// Route hwSetBacklight to wrapHwSetBacklight
-		orgHwSetBacklight = reinterpret_cast<decltype(orgHwSetBacklight)>(patcher.routeFunction(reinterpret_cast<mach_vm_address_t>(solvedSymbol), reinterpret_cast<mach_vm_address_t>(wrapHwSetBacklight), true));
-		if (!orgHwSetBacklight) {
-			SYSLOG("smoother", "Failed to route hwSetBacklight");
-			patcher.clearError();
-			return;
-		}
-
-		DBGLOG("smoother", "Successfully routed hwSetBacklight");
-	}
-}
-
 void PRODUCT_NAME::init_plugin() {
 	workLoop = nullptr;
 	cmdGate = nullptr;
 	currentFramebuffer = nullptr;
 	currentFramebufferOpt = nullptr;
-	orgHwSetBacklight = nullptr;
+	orgReadRegister32 = nullptr;
+	orgWriteRegister32 = nullptr;
 	backlightValueAssigned = false;
-	backlightValue = 0;
+	currentBacklightValue = 0;
+	targetBacklightFrequency = 0;
+	targetPwmControl = 0;
+	driverBacklightFrequency = 0;
 
 	auto &bdi = BaseDeviceInfo::get();
 	auto generation = bdi.cpuGeneration;
@@ -167,8 +88,10 @@ void PRODUCT_NAME::init_plugin() {
 	switch (generation) {
 		case CPUInfo::CpuGeneration::Penryn:
 		case CPUInfo::CpuGeneration::Nehalem:
-		case CPUInfo::CpuGeneration::Westmere:
 			// Do not warn about legacy processors
+			break;
+		case CPUInfo::CpuGeneration::Westmere:
+			currentFramebuffer = &kextIntelHDFb;
 			break;
 		case CPUInfo::CpuGeneration::SandyBridge:
 			currentFramebuffer = &kextIntelSNBFb;
@@ -218,6 +141,222 @@ void PRODUCT_NAME::init_plugin() {
 	[](void *user, KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
 		PRODUCT_NAME::processKext(patcher, index, address, size);
 	}, nullptr);
+}
+
+void PRODUCT_NAME::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+	if ((currentFramebuffer && currentFramebuffer->loadIndex == index) ||
+		(currentFramebufferOpt && currentFramebufferOpt->loadIndex == index)) {
+		// Find actual framebuffer used
+		auto realFramebuffer = (currentFramebuffer && currentFramebuffer->loadIndex == index) ? currentFramebuffer : currentFramebufferOpt;
+
+		orgReadRegister32 = patcher.solveSymbol<decltype(orgReadRegister32)>(index, "__ZN31AppleIntelFramebufferController14ReadRegister32Em", address, size);
+		if (!orgReadRegister32) {
+			SYSLOG("smoother", "Failed to find ReadRegister32");
+			patcher.clearError();
+			return;
+		}
+
+		orgWriteRegister32 = patcher.solveSymbol<decltype(orgWriteRegister32)>(index, "__ZN31AppleIntelFramebufferController15WriteRegister32Emj", address, size);
+		if (!orgReadRegister32) {
+			SYSLOG("smoother", "Failed to find WriteRegister32");
+			patcher.clearError();
+			return;
+		}
+
+		patcher.eraseCoverageInstPrefix(reinterpret_cast<mach_vm_address_t>(orgWriteRegister32));
+	
+		auto cpuGeneration = BaseDeviceInfo::get().cpuGeneration;
+		decltype(wrapIvyWriteRegister32) *wrapWriteRegister32;
+		if (cpuGeneration <= CPUInfo::CpuGeneration::IvyBridge) {
+			wrapWriteRegister32 = wrapIvyWriteRegister32;
+		} else if (cpuGeneration <= CPUInfo::CpuGeneration::KabyLake) {
+			wrapWriteRegister32 = wrapHswWriteRegister32;
+		} else {
+			if (realFramebuffer == &kextIntelCFLFb) {
+				wrapWriteRegister32 = wrapCflRealWriteRegister32;
+			} else {
+				wrapWriteRegister32 = wrapCflFakeWriteRegister32;
+			}
+		}
+
+		orgWriteRegister32 = reinterpret_cast<decltype(orgWriteRegister32)>(patcher.routeFunction(reinterpret_cast<mach_vm_address_t>(orgWriteRegister32), reinterpret_cast<mach_vm_address_t>(wrapWriteRegister32), true));
+
+		if (!orgWriteRegister32) {
+			SYSLOG("smoother", "Failed to route WriteRegister32");
+			patcher.clearError();
+			return;
+		}
+
+		DBGLOG("smoother", "Successfully routed hwSetBacklight");
+	}
+}
+
+void PRODUCT_NAME::wrapIvyWriteRegister32(void *that, uint32_t reg, uint32_t value) {
+	if (reg == BXT_BLC_PWM_FREQ1) {
+		if (value && value != driverBacklightFrequency) {
+			DBGLOG("smoother", "wrapIvyWriteRegister32: driver requested BXT_BLC_PWM_FREQ1 = 0x%x", value);
+			driverBacklightFrequency = value;
+		}
+
+		if (targetBacklightFrequency == 0) {
+			// Save the hardware PWM frequency as initially set up by the system firmware.
+			// We'll need this to restore later after system sleep.
+			targetBacklightFrequency = orgReadRegister32(that, BXT_BLC_PWM_FREQ1);
+			DBGLOG("smoother", "wrapIvyWriteRegister32: system initialized BXT_BLC_PWM_FREQ1 = 0x%x", targetBacklightFrequency);
+
+			if (targetBacklightFrequency == 0) {
+				// This should not happen with correctly written bootloader code, but in case it does, let's use a failsafe default value.
+				targetBacklightFrequency = FallbackTargetBacklightFrequency;
+				SYSLOG("smoother", "wrapIvyWriteRegister32: system initialized BXT_BLC_PWM_FREQ1 is ZERO");
+			}
+		}
+
+		if (value) {
+			// Nonzero writes to this register need to use the original system value.
+			// Yet the driver can safely write zero to this register as part of system sleep.
+			value = targetBacklightFrequency;
+		}
+	} else if (reg == BLC_PWM_CPU_CTL) {
+		if (driverBacklightFrequency && targetBacklightFrequency) {
+			// Translate the PWM duty cycle between the driver scale value and the HW scale value
+			uint32_t rescaledValue = static_cast<uint32_t>((static_cast<uint64_t>(value) * static_cast<uint64_t>(targetBacklightFrequency)) / static_cast<uint64_t>(driverBacklightFrequency));
+			DBGLOG("smoother", "wrapIvyWriteRegister32: write BLC_PWM_CPU_CTL 0x%x/0x%x, rescaled to 0x%x/0x%x", value, driverBacklightFrequency, rescaledValue, targetBacklightFrequency);
+			value = rescaledValue;
+		} else {
+			// This should never happen, but in case it does we should log it at the very least.
+			SYSLOG("smoother", "wrapIvyWriteRegister32: write BLC_PWM_CPU_CTL has zero frequency driver (%d) target (%d)", driverBacklightFrequency, targetBacklightFrequency);
+		}
+	}
+
+	orgWriteRegister32(that, reg, value);
+}
+
+void PRODUCT_NAME::wrapHswWriteRegister32(void *that, uint32_t reg, uint32_t value) {
+	if (reg == BXT_BLC_PWM_FREQ1) {
+		// BXT_BLC_PWM_FREQ1 controls the backlight intensity.
+		// High 16 of this register are the denominator (frequency), low 16 are the numerator (duty cycle).
+
+		if (targetBacklightFrequency == 0) {
+			// Populate the hardware PWM frequency as initially set up by the system firmware.
+			uint32_t org_value = orgReadRegister32(that, BXT_BLC_PWM_FREQ1);
+			targetBacklightFrequency = (org_value & 0xffff0000U) >> 16U;
+			DBGLOG("smoother", "wrapHswWriteRegister32: system initialized PWM frequency = 0x%x", targetBacklightFrequency);
+
+			if (targetBacklightFrequency == 0) {
+				// This should not happen with correctly written bootloader code, but in case it does, let's use a failsafe default value.
+				targetBacklightFrequency = FallbackTargetBacklightFrequency;
+				SYSLOG("smoother", "wrapHswWriteRegister32: system initialized PWM frequency is ZERO");
+			}
+		}
+
+		uint32_t dutyCycle = value & 0xffffU;
+		uint32_t frequency = (value & 0xffff0000U) >> 16U;
+
+		uint32_t rescaledDutyCycle = frequency == 0 ? 0 : static_cast<uint32_t>((static_cast<uint64_t>(dutyCycle) * static_cast<uint64_t>(targetBacklightFrequency)) / static_cast<uint64_t>(frequency));
+
+		if (frequency) {
+			// Nonzero writes to frequency need to use the original system frequency.
+			// Yet the driver can safely write zero to this register as part of system sleep.
+			frequency = targetBacklightFrequency;
+		}
+
+		// Write the rescaled duty cycle and frequency
+		// FIXME: what if rescaled duty cycle overflow unsigned 16 bit int?
+		value = (frequency << 16U) | rescaledDutyCycle;
+	}
+
+	orgWriteRegister32(that, reg, value);
+}
+
+void PRODUCT_NAME::wrapCflRealWriteRegister32(void *that, uint32_t reg, uint32_t value) {
+	if (reg == BXT_BLC_PWM_FREQ1) {
+		if (value && value != driverBacklightFrequency) {
+			DBGLOG("smoother", "wrapCflRealWriteRegister32: driver requested BXT_BLC_PWM_FREQ1 = 0x%x", value);
+			driverBacklightFrequency = value;
+		}
+
+		if (targetBacklightFrequency == 0) {
+			// Save the hardware PWM frequency as initially set up by the system firmware.
+			// We'll need this to restore later after system sleep.
+			targetBacklightFrequency = orgReadRegister32(that, BXT_BLC_PWM_FREQ1);
+			DBGLOG("smoother", "wrapCflRealWriteRegister32: system initialized BXT_BLC_PWM_FREQ1 = 0x%x", targetBacklightFrequency);
+
+			if (targetBacklightFrequency == 0) {
+				// This should not happen with correctly written bootloader code, but in case it does, let's use a failsafe default value.
+				targetBacklightFrequency = FallbackTargetBacklightFrequency;
+				SYSLOG("smoother", "wrapCflRealWriteRegister32: system initialized BXT_BLC_PWM_FREQ1 is ZERO");
+			}
+		}
+
+		if (value) {
+			// Nonzero writes to this register need to use the original system value.
+			// Yet the driver can safely write zero to this register as part of system sleep.
+			value = targetBacklightFrequency;
+		}
+	} else if (reg == BXT_BLC_PWM_DUTY1) {
+		if (driverBacklightFrequency && targetBacklightFrequency) {
+			// Translate the PWM duty cycle between the driver scale value and the HW scale value
+			uint32_t rescaledValue = static_cast<uint32_t>((static_cast<uint64_t>(value) * static_cast<uint64_t>(targetBacklightFrequency)) / static_cast<uint64_t>(driverBacklightFrequency));
+			DBGLOG("smoother", "wrapCflRealWriteRegister32: write PWM_DUTY1 0x%x/0x%x, rescaled to 0x%x/0x%x", value, driverBacklightFrequency, rescaledValue, targetBacklightFrequency);
+			value = rescaledValue;
+		} else {
+			// This should never happen, but in case it does we should log it at the very least.
+			SYSLOG("smoother", "wrapCflRealWriteRegister32: write PWM_DUTY1 has zero frequency driver (%d) target (%d)", driverBacklightFrequency, targetBacklightFrequency);
+		}
+	}
+
+	orgWriteRegister32(that, reg, value);
+}
+
+void PRODUCT_NAME::wrapCflFakeWriteRegister32(void *that, uint32_t reg, uint32_t value) {
+	if (reg == BXT_BLC_PWM_FREQ1) { // aka BLC_PWM_PCH_CTL2
+		if (targetBacklightFrequency == 0) {
+			// Populate the hardware PWM frequency as initially set up by the system firmware.
+			targetBacklightFrequency = orgReadRegister32(that, BXT_BLC_PWM_FREQ1);
+			DBGLOG("smoother", "wrapCflFakeWriteRegister32: system initialized BXT_BLC_PWM_FREQ1 = 0x%x", targetBacklightFrequency);
+			DBGLOG("smoother", "wrapCflFakeWriteRegister32: system initialized BXT_BLC_PWM_CTL1 = 0x%x", orgReadRegister32(that, BXT_BLC_PWM_CTL1));
+
+			if (targetBacklightFrequency == 0) {
+				// This should not happen with correctly written bootloader code, but in case it does, let's use a failsafe default value.
+				targetBacklightFrequency = FallbackTargetBacklightFrequency;
+				SYSLOG("smoother", "wrapCflFakeWriteRegister32: system initialized BXT_BLC_PWM_FREQ1 is ZERO");
+			}
+		}
+
+		// For the KBL driver, 0xc8254 (BLC_PWM_PCH_CTL2) controls the backlight intensity.
+		// High 16 of this write are the denominator (frequency), low 16 are the numerator (duty cycle).
+		// Translate this into a write to c8258 (BXT_BLC_PWM_DUTY1) for the CFL hardware, scaled by the system-provided value in c8254 (BXT_BLC_PWM_FREQ1).
+		uint16_t frequency = (value & 0xffff0000U) >> 16U;
+		uint16_t dutyCycle = value & 0xffffU;
+
+		uint32_t rescaledValue = frequency == 0 ? 0 : static_cast<uint32_t>((static_cast<uint64_t>(dutyCycle) * static_cast<uint64_t>(targetBacklightFrequency)) / static_cast<uint64_t>(frequency));
+		DBGLOG("smoother", "wrapCflFakeWriteRegister32: write PWM_DUTY1 0x%x/0x%x, rescaled to 0x%x/0x%x", dutyCycle, frequency, rescaledValue, targetBacklightFrequency);
+
+		// Reset the hardware PWM frequency. Write the original system value if the driver-requested value is nonzero. If the driver requests
+		// zero, we allow that, since it's trying to turn off the backlight PWM for sleep.
+		orgWriteRegister32(that, BXT_BLC_PWM_FREQ1, frequency ? targetBacklightFrequency : 0);
+
+		// Finish by writing the duty cycle.
+		reg = BXT_BLC_PWM_DUTY1;
+		value = rescaledValue;
+	} else if (reg == BXT_BLC_PWM_CTL1) {
+		if (targetPwmControl == 0) {
+			// Save the original hardware PWM control value
+			targetPwmControl = orgReadRegister32(that, BXT_BLC_PWM_CTL1);
+		}
+
+		DBGLOG("smoother", "wrapCflFakeWriteRegister32: write BXT_BLC_PWM_CTL1 0x%x, previous was 0x%x", value, orgReadRegister32(that, BXT_BLC_PWM_CTL1));
+
+		if (value) {
+			// Set the PWM frequency before turning it on to avoid the 3 minute blackout bug
+			orgWriteRegister32(that, BXT_BLC_PWM_FREQ1, targetBacklightFrequency);
+
+			// Use the original hardware PWM control value.
+			value = targetPwmControl;
+		}
+	}
+
+	orgWriteRegister32(that, reg, value);
 }
 
 static const char *bootargOff[] {
