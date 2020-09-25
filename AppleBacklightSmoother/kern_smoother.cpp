@@ -82,7 +82,7 @@ void PRODUCT_NAME::dischargeQueue() {
 	AppleBacklightSmootherNS::orgWriteRegister32(pair.first, AppleBacklightSmootherNS::backlightDutyRegister, pair.second);
 	DBGLOG("smoother", "dischargeQueue %0x%x", pair.second);
 	if (AppleBacklightSmootherNS::backlightQueue.count() > 0) {
-		AppleBacklightSmootherNS::smoothTimer->setTimeoutMS(10);
+		AppleBacklightSmootherNS::smoothTimer->setTimeoutMS(AppleBacklightSmootherNS::DELAYMS);
 	}
 	IORecursiveLockUnlock(AppleBacklightSmootherNS::lockSmooth);
 }
@@ -227,7 +227,7 @@ void AppleBacklightSmootherNS::generateTables() {
 	// DUTY = a * STEP ^ 2 + START_VALUE
 	double a = static_cast<double>(targetBacklightFrequency - START_VALUE) / static_cast<double>(STEPS * STEPS);
 	for (int i = 0; i < STEPS; i++) {
-		dutyTables[i] = static_cast<uint32_t>(a * i * i + START_VALUE);
+		dutyTables[i] = static_cast<uint32_t>(a * i * i + START_VALUE + 0.5f); // round to nearest integer
 	}
 }
 
@@ -278,7 +278,7 @@ void AppleBacklightSmootherNS::pushQueue(void *that, uint32_t value, uint32_t ma
 	lastBacklightValue = value;
 
 	if (isQueueEmpty) {
-		smoothTimer->setTimeoutMS(10);
+		smoothTimer->setTimeoutMS(DELAYMS);
 	}
 
 	IORecursiveLockUnlock(lockSmooth);

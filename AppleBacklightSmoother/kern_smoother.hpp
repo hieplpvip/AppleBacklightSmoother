@@ -108,6 +108,7 @@ namespace AppleBacklightSmootherNS {
 
 	static constexpr uint32_t START_VALUE = 10;
 	static constexpr uint32_t STEPS = 128;
+	static constexpr uint32_t DELAYMS = 10;
 	static uint32_t dutyTables[STEPS];
 	static void generateTables();
 	static void pushQueue(void *that, uint32_t value, uint32_t mask = 0);
