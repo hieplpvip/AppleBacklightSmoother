@@ -30,14 +30,21 @@ static KernelPatcher::KextInfo kextIntelCNLFb   { "com.apple.driver.AppleIntelCN
 static KernelPatcher::KextInfo kextIntelICLLPFb { "com.apple.driver.AppleIntelICLLPGraphicsFramebuffer", pathIntelICLLPFb, arrsize(pathIntelICLLPFb), {}, {}, KernelPatcher::KextInfo::Unloaded };
 static KernelPatcher::KextInfo kextIntelICLHPFb { "com.apple.driver.AppleIntelICLHPGraphicsFramebuffer", pathIntelICLHPFb, arrsize(pathIntelICLHPFb), {}, {}, KernelPatcher::KextInfo::Unloaded };
 
-namespace SmootherData {
-	static IOCommandGate* cmdGate;
-	static bool triedCmdGate;
+class EXPORT PRODUCT_NAME : public IOService {
+	OSDeclareDefaultStructors(PRODUCT_NAME)
+public:
+	IOService *probe(IOService *provider, SInt32 *score) override;
+	bool start(IOService *provider) override;
+	void stop(IOService *provider) override;
+
+	static IOWorkLoop *workLoop;
+	static IOCommandGate *cmdGate;
 
 	static KernelPatcher::KextInfo *currentFramebuffer;
 	static KernelPatcher::KextInfo *currentFramebufferOpt;
 
 	static uint32_t (*orgHwSetBacklight)(void *, uint32_t);
+	IOReturn wrapHwSetBacklightGated(void *that, uint32_t *backlight);
 
 	static bool backlightValueAssigned;
 	static uint32_t backlightValue;
@@ -47,13 +54,8 @@ namespace SmootherData {
 	static void processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
 
 	static void init_plugin();
-}
-
-class AppleBacklightSmootherDummy : public IOService {
-	OSDeclareDefaultStructors(AppleBacklightSmootherDummy)
-
-public:
-	IOReturn wrapHwSetBacklightGated(void *that, uint32_t *backlight);
 };
+
+extern PRODUCT_NAME *ADDPR(selfInstance);
 
 #endif /* kern_smoother_hpp */

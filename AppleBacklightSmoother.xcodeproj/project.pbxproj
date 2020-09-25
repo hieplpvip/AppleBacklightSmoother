@@ -363,21 +363,7 @@
 				MODULE_NAME = com.hieplpvip.AppleBacklightSmoother;
 				MODULE_START = "$(PRODUCT_NAME)_kern_start";
 				MODULE_STOP = "$(PRODUCT_NAME)_kern_stop";
-				OTHER_CFLAGS = (
-					"-mmmx",
-					"-msse",
-					"-msse2",
-					"-msse3",
-					"-mfpmath=sse",
-					"-mssse3",
-					"-ftree-vectorize",
-					"-fno-non-call-exceptions",
-					"-fno-builtin",
-					"-fno-asynchronous-unwind-tables",
-					"-Wno-unknown-warning-option",
-					"-Wno-ossharedptr-misuse",
-					"-Wno-vla",
-				);
+				OTHER_CPLUSPLUSFLAGS = "-DLILU_CUSTOM_IOKIT_INIT";
 				OTHER_LDFLAGS = "-static";
 				PRODUCT_BUNDLE_IDENTIFIER = com.hieplpvip.AppleBacklightSmoother;
 				WRAPPER_EXTENSION = kext;
@@ -409,21 +395,7 @@
 				MODULE_NAME = com.hieplpvip.AppleBacklightSmoother;
 				MODULE_START = "$(PRODUCT_NAME)_kern_start";
 				MODULE_STOP = "$(PRODUCT_NAME)_kern_stop";
-				OTHER_CFLAGS = (
-					"-mmmx",
-					"-msse",
-					"-msse2",
-					"-msse3",
-					"-mfpmath=sse",
-					"-mssse3",
-					"-ftree-vectorize",
-					"-fno-non-call-exceptions",
-					"-fno-builtin",
-					"-fno-asynchronous-unwind-tables",
-					"-Wno-unknown-warning-option",
-					"-Wno-ossharedptr-misuse",
-					"-Wno-vla",
-				);
+				OTHER_CPLUSPLUSFLAGS = "-DLILU_CUSTOM_IOKIT_INIT";
 				OTHER_LDFLAGS = "-static";
 				PRODUCT_BUNDLE_IDENTIFIER = com.hieplpvip.AppleBacklightSmoother;
 				STRIP_STYLE = "non-global";
@@ -511,23 +483,7 @@
 				MODULE_NAME = com.hieplpvip.AppleBacklightSmoother;
 				MODULE_START = "$(PRODUCT_NAME)_kern_start";
 				MODULE_STOP = "$(PRODUCT_NAME)_kern_stop";
-				OTHER_CFLAGS = (
-					"-mmmx",
-					"-msse",
-					"-msse2",
-					"-msse3",
-					"-mfpmath=sse",
-					"-mssse3",
-					"-ftree-vectorize",
-					"-fno-non-call-exceptions",
-					"-fno-builtin",
-					"-fno-asynchronous-unwind-tables",
-					"-fsanitize=undefined,nullability",
-					"-fno-sanitize=function",
-					"-Wno-unknown-warning-option",
-					"-Wno-ossharedptr-misuse",
-					"-Wno-vla",
-				);
+				OTHER_CPLUSPLUSFLAGS = "-DLILU_CUSTOM_IOKIT_INIT";
 				OTHER_LDFLAGS = "-static";
 				PRODUCT_BUNDLE_IDENTIFIER = com.hieplpvip.AppleBacklightSmoother;
 				WRAPPER_EXTENSION = kext;

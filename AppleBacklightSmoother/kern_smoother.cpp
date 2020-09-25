@@ -12,11 +12,67 @@
 
 #include "kern_smoother.hpp"
 
-IOReturn AppleBacklightSmootherDummy::wrapHwSetBacklightGated(void *that, uint32_t *backlight) {
+static const char kextVersion[] {
+#ifdef DEBUG
+	'D', 'B', 'G', '-',
+#else
+	'R', 'E', 'L', '-',
+#endif
+	xStringify(MODULE_VERSION)[0], xStringify(MODULE_VERSION)[2], xStringify(MODULE_VERSION)[4], '-',
+	getBuildYear<0>(), getBuildYear<1>(), getBuildYear<2>(), getBuildYear<3>(), '-',
+	getBuildMonth<0>(), getBuildMonth<1>(), '-', getBuildDay<0>(), getBuildDay<1>(), '\0'
+};
+
+OSDefineMetaClassAndStructors(PRODUCT_NAME, IOService)
+
+PRODUCT_NAME *ADDPR(selfInstance) = nullptr;
+
+IOService *PRODUCT_NAME::probe(IOService *provider, SInt32 *score) {
+	ADDPR(selfInstance) = this;
+	setProperty("VersionInfo", kextVersion);
+	auto service = IOService::probe(provider, score);
+	return ADDPR(startSuccess) ? service : nullptr;
+}
+
+bool PRODUCT_NAME::start(IOService *provider) {
+	ADDPR(selfInstance) = this;
+	if (!IOService::start(provider)) {
+		SYSLOG("start", "failed to start the parent");
+		return false;
+	}
+
+	workLoop = ADDPR(selfInstance)->getWorkLoop();
+	if (!workLoop) {
+		SYSLOG("start", "failed to get workloop");
+		return false;
+	}
+
+	cmdGate = IOCommandGate::commandGate(this);
+	if (!cmdGate || workLoop->addEventSource(cmdGate) != kIOReturnSuccess) {
+		SYSLOG("start", "failed to open command gate");
+		return false;
+	}
+
+	return ADDPR(startSuccess);
+}
+
+void PRODUCT_NAME::stop(IOService *provider) {
+	ADDPR(selfInstance) = nullptr;
+	if (cmdGate) {
+		workLoop->removeEventSource(cmdGate);
+		OSSafeReleaseNULL(cmdGate);
+	}
+	if (workLoop) {
+		OSSafeReleaseNULL(workLoop);
+	}
+	IOService::stop(provider);
+}
+
+IOReturn PRODUCT_NAME::wrapHwSetBacklightGated(void *that, uint32_t *backlight) {
 	DBGLOG("smoother", "wrapHwSetBacklight called: backlight 0x%x", *backlight);
 
-	if (SmootherData::backlightValueAssigned) {
-		uint32_t curBacklight = SmootherData::backlightValue;
+	if (backlightValueAssigned) {
+		uint32_t curBacklight = backlightValue;
 		uint32_t newBacklight = *backlight;
 		uint32_t diff = (newBacklight > curBacklight) ? (newBacklight - curBacklight) : (curBacklight - newBacklight);
 		if (diff > 0x10) {
@@ -25,53 +81,41 @@ IOReturn AppleBacklightSmootherDummy::wrapHwSetBacklightGated(void *that, uint32
 			if (newBacklight > curBacklight) {
 				while ((curBacklight += delta) < newBacklight) {
 					DBGLOG("smoother", "wrapHwSetBacklight set backlight 0x%x delta %d", curBacklight, delta);
-					SmootherData::orgHwSetBacklight(that, curBacklight);
+					orgHwSetBacklight(that, curBacklight);
 					IOSleep(10); // Wait 5 miliseconds
 				}
 			} else {
 				while (curBacklight > delta && (curBacklight -= delta) > newBacklight) {
 					DBGLOG("smoother", "wrapHwSetBacklight set backlight 0x%x step %d", curBacklight, delta);
-					SmootherData::orgHwSetBacklight(that, curBacklight);
+					orgHwSetBacklight(that, curBacklight);
 					IOSleep(10); // Wait 5 miliseconds
 				}
 			}
 		}
 	}
 
-	SmootherData::backlightValue = *backlight;
-	SmootherData::backlightValueAssigned = true;
-	SmootherData::orgHwSetBacklight(that, *backlight);
+	backlightValue = *backlight;
+	backlightValueAssigned = true;
+	orgHwSetBacklight(that, *backlight);
 
 	return kIOReturnSuccess;
 }
 
-IOReturn SmootherData::wrapHwSetBacklight(void *that, uint32_t backlight) {
-	if (!triedCmdGate && ADDPR(selfInstance)) {
-		triedCmdGate = true;
-
-		IOWorkLoop* workLoop = ADDPR(selfInstance)->getWorkLoop();
-		if (workLoop) {
-			SmootherData::cmdGate = IOCommandGate::commandGate(ADDPR(selfInstance));
-			if (SmootherData::cmdGate) {
-				workLoop->addEventSource(SmootherData::cmdGate);
-			}
-		}
-	}
-
-	if (SmootherData::cmdGate) {
-		SmootherData::cmdGate->runAction(OSMemberFunctionCast(IOCommandGate::Action, nullptr, &AppleBacklightSmootherDummy::wrapHwSetBacklightGated), that, (void *)&backlight);
+IOReturn PRODUCT_NAME::wrapHwSetBacklight(void *that, uint32_t backlight) {
+	if (cmdGate) {
+		cmdGate->runAction(OSMemberFunctionCast(IOCommandGate::Action, ADDPR(selfInstance), &PRODUCT_NAME::wrapHwSetBacklightGated), that, (void *)&backlight);
 	} else {
-		SmootherData::orgHwSetBacklight(that, backlight);
+		orgHwSetBacklight(that, backlight);
 	}
 
 	return kIOReturnSuccess;
 }
 
-void SmootherData::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
-	if ((SmootherData::currentFramebuffer && SmootherData::currentFramebuffer->loadIndex == index) ||
-		(SmootherData::currentFramebufferOpt && SmootherData::currentFramebufferOpt->loadIndex == index)) {
+void PRODUCT_NAME::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+	if ((currentFramebuffer && currentFramebuffer->loadIndex == index) ||
+		(currentFramebufferOpt && currentFramebufferOpt->loadIndex == index)) {
 		// Find actual framebuffer used
-		auto realFramebuffer = (SmootherData::currentFramebuffer && SmootherData::currentFramebuffer->loadIndex == index) ? SmootherData::currentFramebuffer : SmootherData::currentFramebufferOpt;
+		auto realFramebuffer = (currentFramebuffer && currentFramebuffer->loadIndex == index) ? currentFramebuffer : currentFramebufferOpt;
 
 		// Find hwSetBacklight symbol
 		auto hwSetBacklightSym = "";
@@ -96,8 +140,8 @@ void SmootherData::processKext(KernelPatcher &patcher, size_t index, mach_vm_add
 		}
 
 		// Route hwSetBacklight to wrapHwSetBacklight
-		SmootherData::orgHwSetBacklight = reinterpret_cast<decltype(SmootherData::orgHwSetBacklight)>(patcher.routeFunction(reinterpret_cast<mach_vm_address_t>(solvedSymbol), reinterpret_cast<mach_vm_address_t>(SmootherData::wrapHwSetBacklight), true));
-		if (!SmootherData::orgHwSetBacklight) {
+		orgHwSetBacklight = reinterpret_cast<decltype(orgHwSetBacklight)>(patcher.routeFunction(reinterpret_cast<mach_vm_address_t>(solvedSymbol), reinterpret_cast<mach_vm_address_t>(wrapHwSetBacklight), true));
+		if (!orgHwSetBacklight) {
 			SYSLOG("smoother", "Failed to route hwSetBacklight");
 			patcher.clearError();
 			return;
@@ -107,14 +151,14 @@ void SmootherData::processKext(KernelPatcher &patcher, size_t index, mach_vm_add
 	}
 }
 
-void SmootherData::init_plugin() {
-	SmootherData::cmdGate = nullptr;
-	SmootherData::triedCmdGate = false;
-	SmootherData::currentFramebuffer = nullptr;
-	SmootherData::currentFramebufferOpt = nullptr;
-	SmootherData::orgHwSetBacklight = nullptr;
-	SmootherData::backlightValueAssigned = false;
-	SmootherData::backlightValue = 0;
+void PRODUCT_NAME::init_plugin() {
+	workLoop = nullptr;
+	cmdGate = nullptr;
+	currentFramebuffer = nullptr;
+	currentFramebufferOpt = nullptr;
+	orgHwSetBacklight = nullptr;
+	backlightValueAssigned = false;
+	backlightValue = 0;
 
 	auto &bdi = BaseDeviceInfo::get();
 	auto generation = bdi.cpuGeneration;
@@ -127,52 +171,52 @@ void SmootherData::init_plugin() {
 			// Do not warn about legacy processors
 			break;
 		case CPUInfo::CpuGeneration::SandyBridge:
-			SmootherData::currentFramebuffer = &kextIntelSNBFb;
+			currentFramebuffer = &kextIntelSNBFb;
 			break;
 		case CPUInfo::CpuGeneration::IvyBridge:
-			SmootherData::currentFramebuffer = &kextIntelCapriFb;
+			currentFramebuffer = &kextIntelCapriFb;
 			break;
 		case CPUInfo::CpuGeneration::Haswell:
-			SmootherData::currentFramebuffer = &kextIntelAzulFb;
+			currentFramebuffer = &kextIntelAzulFb;
 			break;
 		case CPUInfo::CpuGeneration::Broadwell:
-			SmootherData::currentFramebuffer = &kextIntelBDWFb;
+			currentFramebuffer = &kextIntelBDWFb;
 			break;
 		case CPUInfo::CpuGeneration::Skylake:
-			SmootherData::currentFramebuffer = &kextIntelSKLFb;
+			currentFramebuffer = &kextIntelSKLFb;
 			break;
 		case CPUInfo::CpuGeneration::KabyLake:
-			SmootherData::currentFramebuffer = &kextIntelKBLFb;
+			currentFramebuffer = &kextIntelKBLFb;
 			break;
 		case CPUInfo::CpuGeneration::CoffeeLake:
-			SmootherData::currentFramebuffer = &kextIntelCFLFb;
-			SmootherData::currentFramebufferOpt = &kextIntelKBLFb;
+			currentFramebuffer = &kextIntelCFLFb;
+			currentFramebufferOpt = &kextIntelKBLFb;
 			break;
 		case CPUInfo::CpuGeneration::CannonLake:
-			SmootherData::currentFramebuffer = &kextIntelCNLFb;
+			currentFramebuffer = &kextIntelCNLFb;
 			break;
 		case CPUInfo::CpuGeneration::IceLake:
-			SmootherData::currentFramebuffer = &kextIntelICLLPFb;
-			SmootherData::currentFramebufferOpt = &kextIntelICLHPFb;
+			currentFramebuffer = &kextIntelICLLPFb;
+			currentFramebufferOpt = &kextIntelICLHPFb;
 			break;
 		case CPUInfo::CpuGeneration::CometLake:
-			SmootherData::currentFramebuffer = &kextIntelCFLFb;
-			SmootherData::currentFramebufferOpt = &kextIntelKBLFb;
+			currentFramebuffer = &kextIntelCFLFb;
+			currentFramebufferOpt = &kextIntelKBLFb;
 			break;
 		default:
 			SYSLOG("smoother", "found an unsupported processor 0x%X:0x%X, please report this!", family, model);
 			break;
 	}
 
-	if (SmootherData::currentFramebuffer)
-		lilu.onKextLoadForce(SmootherData::currentFramebuffer);
+	if (currentFramebuffer)
+		lilu.onKextLoadForce(currentFramebuffer);
 
-	if (SmootherData::currentFramebufferOpt)
-		lilu.onKextLoadForce(SmootherData::currentFramebufferOpt);
+	if (currentFramebufferOpt)
+		lilu.onKextLoadForce(currentFramebufferOpt);
 
 	lilu.onKextLoadForce(nullptr, 0,
 	[](void *user, KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
-		SmootherData::processKext(patcher, index, address, size);
+		PRODUCT_NAME::processKext(patcher, index, address, size);
 	}, nullptr);
 }
 
@@ -201,6 +245,6 @@ PluginConfiguration ADDPR(config) {
 	KernelVersion::MountainLion,
 	KernelVersion::BigSur,
 	[]() {
-		SmootherData::init_plugin();
+		PRODUCT_NAME::init_plugin();
 	}
 };
