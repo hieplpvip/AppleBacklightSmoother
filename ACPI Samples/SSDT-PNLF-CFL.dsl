@@ -1,8 +1,10 @@
 // Add PNLF device for AppleBacklightSmoother.kext
 // For Coffee Lake and newer
 
-DefinitionBlock("", "SSDT", 2, "HIEP", "PNLF", 0)
+DefinitionBlock ("", "SSDT", 2, "HIEP", "PNLF", 0)
 {
+    External (_SB_.PCI0.GFX0, DeviceObj)
+
     Scope (_SB.PCI0.GFX0)
     {
         Device (PNLF)
