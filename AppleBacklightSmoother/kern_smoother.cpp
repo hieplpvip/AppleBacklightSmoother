@@ -8,22 +8,12 @@
 #include <Headers/plugin_start.hpp>
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_devinfo.hpp>
+#include <Headers/kern_version.hpp>
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOLocks.h>
 
 #include "kern_smoother.hpp"
-
-static const char kextVersion[] {
-#ifdef DEBUG
-	'D', 'B', 'G', '-',
-#else
-	'R', 'E', 'L', '-',
-#endif
-	xStringify(MODULE_VERSION)[0], xStringify(MODULE_VERSION)[2], xStringify(MODULE_VERSION)[4], '-',
-	getBuildYear<0>(), getBuildYear<1>(), getBuildYear<2>(), getBuildYear<3>(), '-',
-	getBuildMonth<0>(), getBuildMonth<1>(), '-', getBuildDay<0>(), getBuildDay<1>(), '\0'
-};
 
 OSDefineMetaClassAndStructors(PRODUCT_NAME, IOService)
 
