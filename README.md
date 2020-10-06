@@ -8,6 +8,19 @@
 
 A Lilu plugin that patches Apple Intel graphics drivers to get smooth backlight transition
 
+#### Installation
+
+- Compile `SSDT-PNLF.dsl`.
+- Inject `AppleBacklightSmoother.kext` and `SSDT-PNLF.aml` using your favorite bootloader.
+- If you're using Coffee Lake or above, you need to turn off WhateverGreen's backlight patch by using boot argument `igfxcflbklt=0`.
+
+#### Boot arguments
+
+- `-applbklsmoothdbg` to enable debug printing (available in DEBUG binaries).
+- `-applbklsmoothbeta` to enable loading on unsupported macOS versions (11.0 and below are enabled by default).
+- `-applbklsmoothoff` to disable kext loading.
+
 #### Credits
+
 - [Apple](https://www.apple.com) for macOS
 - [vit9696](https://github.com/vit9696) for [Lilu](https://github.com/acidanthera/Lilu) and [WhateverGreen](https://github.com/acidanthera/WhateverGreen)
