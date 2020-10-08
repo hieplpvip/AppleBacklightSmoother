@@ -78,6 +78,11 @@ void PRODUCT_NAME::dischargeQueue() {
 			AppleBacklightSmootherNS::orgWriteRegister32(pair.first, AppleBacklightSmootherNS::backlightDutyRegister, pair.second);
 			AppleBacklightSmootherNS::currentBacklightValue = pair.third;
 			DBGLOG("smoother", "dischargeQueue set backlight register 0x%x to %0x%x", AppleBacklightSmootherNS::backlightDutyRegister, pair.second);
+#ifdef DEBUG
+			if (ADDPR(selfInstance)) {
+				ADDPR(selfInstance)->setProperty("Current Backlight Value", AppleBacklightSmootherNS::currentBacklightValue);
+			}
+#endif
 			break;
 		}
 #undef IMIN
@@ -310,6 +315,11 @@ void AppleBacklightSmootherNS::pushQueue(void *that, uint32_t value, uint32_t ma
 	}
 
 	lastRequestedBacklightValue = value;
+#ifdef DEBUG
+	if (ADDPR(selfInstance)) {
+		ADDPR(selfInstance)->setProperty("Last Requested Backlight Value", lastRequestedBacklightValue);
+	}
+#endif
 
 	if (isQueueEmpty) {
 		smoothTimer->setTimeoutMS(DELAYMS);
