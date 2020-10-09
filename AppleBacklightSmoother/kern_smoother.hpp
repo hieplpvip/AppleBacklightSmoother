@@ -110,6 +110,7 @@ namespace AppleBacklightSmootherNS {
 	static constexpr uint32_t STEPS = 256;
 	static constexpr uint32_t DELAYMS = 7;
 	static uint32_t dutyTables[STEPS];
+	static bool tableGenerated;
 	static void generateTables();
 	inline static int lowerBound(uint32_t *data, int from, int to, int value);
 	inline static int upperBound(uint32_t *data, int from, int to, int value);
@@ -117,6 +118,7 @@ namespace AppleBacklightSmootherNS {
 
 	static void wrapIvyWriteRegister32(void *that, uint32_t reg, uint32_t value);
 	static void wrapHswWriteRegister32(void *that, uint32_t reg, uint32_t value);
+	static void wrapKblFakeWriteRegister32(void *that, uint32_t reg, uint32_t value);
 	static void wrapCflRealWriteRegister32(void *that, uint32_t reg, uint32_t value);
 	static void wrapCflFakeWriteRegister32(void *that, uint32_t reg, uint32_t value);
 

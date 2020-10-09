@@ -109,6 +109,7 @@ void AppleBacklightSmootherNS::init_plugin() {
 	targetPwmControl = 0;
 	driverBacklightFrequency = 0;
 	backlightDutyRegister = 0;
+	tableGenerated = false;
 
 #ifdef DEBUG
 	loggedFrequency = false;
@@ -210,12 +211,30 @@ void AppleBacklightSmootherNS::processKext(KernelPatcher &patcher, size_t index,
 			wrapWriteRegister32 = wrapHswWriteRegister32;
 			backlightDutyRegister = BXT_BLC_PWM_FREQ1;
 		} else {
-			if (realFramebuffer == &kextIntelCFLFb) {
-				wrapWriteRegister32 = wrapCflRealWriteRegister32;
-			} else {
-				wrapWriteRegister32 = wrapCflFakeWriteRegister32;
+			// Get CPU stepping to determine if it's Kaby Lake-R of Coffee Lake
+			uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+			asm volatile ("xchgq %%rbx, %q1\n"
+						  "cpuid\n"
+						  "xchgq %%rbx, %q1"
+						  : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx)
+						  : "0" (1), "2" (0));
+
+			uint32_t stepping = eax & 0xf;
+			if (stepping == 0xa) { // Kaby Lake-R
+				if (realFramebuffer == &kextIntelCFLFb) {
+					wrapWriteRegister32 = wrapKblFakeWriteRegister32;
+				} else {
+					wrapWriteRegister32 = wrapHswWriteRegister32;
+				}
+				backlightDutyRegister = BXT_BLC_PWM_FREQ1;
+			} else { // Coffee Lake
+				if (realFramebuffer == &kextIntelCFLFb) {
+					wrapWriteRegister32 = wrapCflRealWriteRegister32;
+				} else {
+					wrapWriteRegister32 = wrapCflFakeWriteRegister32;
+				}
+				backlightDutyRegister = BXT_BLC_PWM_DUTY1;
 			}
-			backlightDutyRegister = BXT_BLC_PWM_DUTY1;
 		}
 
 		// Route WriteRegister32
@@ -238,6 +257,7 @@ void AppleBacklightSmootherNS::generateTables() {
 	for (int i = 0; i < STEPS; i++) {
 		dutyTables[i] = static_cast<uint32_t>(a * i * i + START_VALUE + 0.5f); // round to nearest integer
 	}
+	tableGenerated = true;
 }
 
 int AppleBacklightSmootherNS::lowerBound(uint32_t *data, int from, int to, int value) {
@@ -285,6 +305,12 @@ void AppleBacklightSmootherNS::pushQueue(void *that, uint32_t value, uint32_t ma
 #endif
 
 	if (lastRequestedBacklightValue == value) {
+		return;
+	}
+
+	if (!tableGenerated) {
+		orgWriteRegister32(that, backlightDutyRegister, mask | value);
+		currentBacklightValue = value;
 		return;
 	}
 
@@ -425,6 +451,67 @@ void AppleBacklightSmootherNS::wrapHswWriteRegister32(void *that, uint32_t reg, 
 		value = (frequency << 16U) | rescaledValue;
 		backlightValueAssigned = true;
 		lastRequestedBacklightValue = currentBacklightValue = rescaledValue;
+	}
+
+	orgWriteRegister32(that, reg, value);
+}
+
+void AppleBacklightSmootherNS::wrapKblFakeWriteRegister32(void *that, uint32_t reg, uint32_t value) {
+	if (reg == BXT_BLC_PWM_FREQ1) {
+		uint32_t frequency = value;
+
+		if (frequency && frequency != driverBacklightFrequency) {
+			DBGLOG("smoother", "wrapKblFakeWriteRegister32: driver requested BXT_BLC_PWM_FREQ1 = 0x%x", value);
+			driverBacklightFrequency = frequency;
+		}
+
+		if (targetBacklightFrequency == 0) {
+			// Save the hardware PWM frequency as initially set up by the system firmware.
+			// We'll need this to restore later after system sleep.
+			targetBacklightFrequency = (orgReadRegister32(that, BXT_BLC_PWM_FREQ1) & 0xffff0000U) >> 16U;
+			DBGLOG("smoother", "wrapKblFakeWriteRegister32: system initialized PWM MAX = 0x%x", targetBacklightFrequency);
+
+			if (targetBacklightFrequency == 0) {
+				// This should not happen with correctly written bootloader code, but in case it does, let's use a failsafe default value.
+				targetBacklightFrequency = FallbackTargetBacklightFrequency;
+				SYSLOG("smoother", "wrapKblFakeWriteRegister32: system initialized PWM MAX is ZERO");
+			}
+
+			generateTables();
+		}
+
+		if (frequency) {
+			// Nonzero writes to PWM frequency need to use the original system value.
+			// Yet the driver can safely write zero as part of system sleep.
+			frequency = targetBacklightFrequency;
+		}
+
+		// Read current duty cycle
+		uint32_t dutyCycle = orgReadRegister32(that, BXT_BLC_PWM_FREQ1) & 0xffffU;
+
+		value = (frequency << 16U) | dutyCycle;
+	} else if (reg == BXT_BLC_PWM_DUTY1) {
+		if (driverBacklightFrequency && targetBacklightFrequency) {
+			// Translate the PWM duty cycle between the driver scale value and the HW scale value
+			uint32_t rescaledValue = static_cast<uint32_t>((static_cast<uint64_t>(value) * static_cast<uint64_t>(targetBacklightFrequency)) / static_cast<uint64_t>(driverBacklightFrequency));
+			DBGLOG("smoother", "wrapKblFakeWriteRegister32: write PWM_DUTY1 0x%x/0x%x, rescaled to 0x%x/0x%x", value, driverBacklightFrequency, rescaledValue, targetBacklightFrequency);
+
+			// Read current frequency
+			uint32_t frequency = (orgReadRegister32(that, BXT_BLC_PWM_FREQ1) & 0xffff0000U) >> 16U;
+
+			if (lockSmooth && backlightValueAssigned) {
+				pushQueue(that, rescaledValue, (frequency << 16U));
+				return;
+			}
+
+			reg = BXT_BLC_PWM_FREQ1;
+			value = (frequency << 16U) | rescaledValue;
+			backlightValueAssigned = true;
+			lastRequestedBacklightValue = currentBacklightValue = rescaledValue;
+		} else {
+			// This should never happen, but in case it does we should log it at the very least.
+			SYSLOG("smoother", "wrapKblFakeWriteRegister32: write PWM_DUTY1 has zero frequency driver (%d) target (%d)", driverBacklightFrequency, targetBacklightFrequency);
+		}
 	}
 
 	orgWriteRegister32(that, reg, value);
