@@ -168,8 +168,9 @@ void AppleBacklightSmootherNS::init_plugin() {
 		lilu.onKextLoadForce(currentFramebuffer);
 	}
 
-	if (currentFramebufferOpt)
+	if (currentFramebufferOpt) {
 		lilu.onKextLoadForce(currentFramebufferOpt);
+	}
 
 	lilu.onKextLoadForce(nullptr, 0,
 	[](void *user, KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
@@ -421,7 +422,6 @@ void AppleBacklightSmootherNS::wrapHswWriteRegister32(void *that, uint32_t reg, 
 		}
 
 		// Write the rescaled duty cycle and frequency
-		// FIXME: what if rescaled duty cycle overflow unsigned 16 bit int?
 		value = (frequency << 16U) | rescaledValue;
 		backlightValueAssigned = true;
 		lastRequestedBacklightValue = currentBacklightValue = rescaledValue;
