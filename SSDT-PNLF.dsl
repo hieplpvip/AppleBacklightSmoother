@@ -93,10 +93,9 @@ DefinitionBlock("", "SSDT", 2, "HIEP", "PNLF", 0)
             }
 
             // assume Coffee Lake and newer
-            Else
+            ElseIf (Ones != Match(Package()
             {
-
-            0x3e9b, 0x3ea5, 0x3e92, 0x3e91,
+                0x3e9b, 0x3ea5, 0x3e92, 0x3e91,
             }, MEQ, Local0, MTR, 0, 0))
             {
                 _UID = 19
