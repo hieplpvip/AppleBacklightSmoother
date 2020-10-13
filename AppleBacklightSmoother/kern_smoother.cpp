@@ -211,7 +211,8 @@ void AppleBacklightSmootherNS::processKext(KernelPatcher &patcher, size_t index,
 			wrapWriteRegister32 = wrapHswWriteRegister32;
 			backlightDutyRegister = BXT_BLC_PWM_FREQ1;
 		} else {
-			// Get CPU stepping to determine if it's Kaby Lake-R of Coffee Lake
+			// Lilu classifies Kaby Lake-R as Coffee Lake,
+			// we need to use CPU stepping to determine if it's Kaby Lake-R or Coffee Lake+
 			uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
 			asm volatile ("xchgq %%rbx, %q1\n"
 						  "cpuid\n"
@@ -220,14 +221,14 @@ void AppleBacklightSmootherNS::processKext(KernelPatcher &patcher, size_t index,
 						  : "0" (1), "2" (0));
 
 			uint32_t stepping = eax & 0xf;
-			if (stepping == 0xa) { // Kaby Lake-R
+			if (cpuGeneration == CPUInfo::CpuGeneration::CoffeeLake && stepping == 0xa) { // Kaby Lake-R
 				if (realFramebuffer == &kextIntelCFLFb) {
 					wrapWriteRegister32 = wrapKblFakeWriteRegister32;
 				} else {
 					wrapWriteRegister32 = wrapHswWriteRegister32;
 				}
 				backlightDutyRegister = BXT_BLC_PWM_FREQ1;
-			} else { // Coffee Lake
+			} else { // Coffee Lake+
 				if (realFramebuffer == &kextIntelCFLFb) {
 					wrapWriteRegister32 = wrapCflRealWriteRegister32;
 				} else {
