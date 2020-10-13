@@ -19,9 +19,19 @@ DefinitionBlock("", "SSDT", 2, "HIEP", "PNLF", 0)
         // 16: Skylake/KabyLake
         // 17: custom LMAX=0x7a1
         // 18: custom LMAX=0x1499
-        // 19: CoffeeLake 0xffff
+        // 19: CoffeeLake 0xff3e
         Name(_UID, 0)
-        Name(_STA, 0x0B)
+        Method (_STA, 0, NotSerialized)  // _STA: Status
+        {
+            If (_OSI ("Darwin"))
+            {
+                Return (0x0B)
+            }
+            Else
+            {
+                Return (0)
+            }
+        }
 
         Field(RMP1, AnyAcc, NoLock, Preserve)
         {
@@ -84,6 +94,10 @@ DefinitionBlock("", "SSDT", 2, "HIEP", "PNLF", 0)
 
             // assume Coffee Lake and newer
             Else
+            {
+
+            0x3e9b, 0x3ea5, 0x3e92, 0x3e91,
+            }, MEQ, Local0, MTR, 0, 0))
             {
                 _UID = 19
             }
