@@ -19,6 +19,7 @@ A Lilu plugin that patches Apple Intel graphics drivers to get smooth backlight 
 - `-applbklsmoothdbg` to enable debug printing (available in DEBUG binaries).
 - `-applbklsmoothbeta` to enable loading on unsupported macOS versions (11.0 and below are enabled by default).
 - `-applbklsmoothoff` to disable kext loading.
+- `igfxpwmmax=0x????` to set PWMMAX value to `0x????`
 
 #### Credits
 

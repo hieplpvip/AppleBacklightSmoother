@@ -165,6 +165,12 @@ void AppleBacklightSmootherNS::init_plugin() {
 			break;
 	}
 
+	uint32_t pwmmax_boot_arg;
+	if (PE_parse_boot_argn("igfxpwmmax", &pwmmax_boot_arg, sizeof(pwmmax_boot_arg)) && pwmmax_boot_arg != 0) {
+		targetBacklightFrequency = pwmmax_boot_arg;
+		generateTables();
+	}
+
 	if (currentFramebuffer) {
 		lilu.onKextLoadForce(currentFramebuffer);
 	}
