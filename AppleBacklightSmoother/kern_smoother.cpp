@@ -246,7 +246,7 @@ void AppleBacklightSmootherNS::processKext(KernelPatcher &patcher, size_t index,
 
 		// Route WriteRegister32
 		patcher.eraseCoverageInstPrefix(reinterpret_cast<mach_vm_address_t>(orgWriteRegister32));
-		orgWriteRegister32 = reinterpret_cast<decltype(orgWriteRegister32)>(patcher.routeFunction(reinterpret_cast<mach_vm_address_t>(orgWriteRegister32), reinterpret_cast<mach_vm_address_t>(wrapWriteRegister32), true));
+		orgWriteRegister32 = reinterpret_cast<decltype(orgWriteRegister32)>(patcher.routeFunctionLong(reinterpret_cast<mach_vm_address_t>(orgWriteRegister32), reinterpret_cast<mach_vm_address_t>(wrapWriteRegister32), true));
 
 		if (!orgWriteRegister32) {
 			SYSLOG("smoother", "Failed to route WriteRegister32");
