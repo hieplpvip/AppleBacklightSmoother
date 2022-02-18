@@ -1,3 +1,5 @@
+**ARCHIVED: This functionality is now available in [WhateverGreen](https://github.com/acidanthera/WhateverGreen). Please use it instead.**
+
 # AppleBacklightSmoother
 
 [![Github release](https://img.shields.io/github/release/hieplpvip/AppleBacklightSmoother.svg?color=blue)](https://github.com/hieplpvip/AppleBacklightSmoother/releases/latest)
